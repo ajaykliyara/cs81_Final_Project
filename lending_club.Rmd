@@ -81,4 +81,6 @@ all_zeros <- sapply(df, function(x) {
   col_sum == 0
 })
 df <- df[,all_zeros==FALSE]
+
+write.csv(df, "data/loanstats_2015_R.csv")
 ```

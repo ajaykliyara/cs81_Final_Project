@@ -52,7 +52,8 @@ df$emp_length <- as.numeric(df$emp_length)
 
 # remove '%' from revol_util
 df$revol_util <- gsub("%", "", df$revol_util)
-
+df$revol_util <- as.numeric(df$revol_util)
+  
 # average fico high and low
 df <- df %>% 
   mutate(fico = (fico_range_high + fico_range_low) / 2) %>%
@@ -71,6 +72,7 @@ df <- df %>%
 
 # remove "months" from the term column
 df$term <- str_match(df$term, "[0123456789+]")
+df$term <- as.numeric(df$term)
 
 # remove columns which are all zeros
 all_zeros <- sapply(df, function(x) {
@@ -81,6 +83,10 @@ all_zeros <- sapply(df, function(x) {
   col_sum == 0
 })
 df <- df[,all_zeros==FALSE]
+
+# make sure all columns are numeric or factors
+df$home_ownership <- as.factor(df$home_ownership)
+df$addr_state <- as.factor(df$addr_state)
 
 write.csv(df, "data/loanstats_2015_R.csv")
 ```

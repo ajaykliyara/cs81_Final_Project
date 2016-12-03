@@ -19,12 +19,53 @@ library(reshape2)
 library(ggplot2)
 library(zoo)
 library(dplyr)
+library(ROCR)
+library(pROC)
+library(h2o)
 ```
 
 ```{r}
+############ y_hat data wrangling
 # read the csv data file
-df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE, 
-                    stringsAsFactors = F, skip = 1)
+df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE,
+                stringsAsFactors = F, skip = 1)
+
+#get rid of fields that are 80% NA
+poor_coverage <- sapply(df, function(x) {
+  coverage <- 1 - sum(is.na(x)) / length(x)
+  coverage < 0.8
+})
+df <- df[,poor_coverage==FALSE]
+
+bad_indicators <- c("Late (31-120 days)", "Default", "Charged Off")
+df <- df %>%
+  mutate(is_bad = ifelse(df$loan_status %in% bad_indicators, 1, 0)) %>%
+  select(-loan_status)
+
+date_format <- "%b-%Y"
+df$yearmon <- as.Date(as.yearmon(df$issue_d,date_format))
+df$year_issued <- year(df$yearmon)
+
+# remove '%' from revol_util
+df$revol_util <- gsub("%", "", df$revol_util)
+df$revol_util <- as.numeric(df$revol_util)
+
+df.term <- subset(df.term, year_issued < 2012)
+df.term$home_ownership <- factor(df.term$home_ownership)
+df.term$is_rent <- df.term$home_ownership=="RENT"
+
+cols <- c("last_fico_range_high", "last_fico_range_low", "pub_rec_bankruptcies", "revol_util",
+          "inq_last_6mths", "is_rent", "is_bad")
+df.term <- df.term[,cols]
+
+write.csv(df.term, "data/loanstats_2015_y.csv")
+```
+
+
+```{r}
+# read the csv data file
+df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE,
+                stringsAsFactors = F, skip = 1)
 
 #get rid of fields that are 80% NA
 poor_coverage <- sapply(df, function(x) {
@@ -37,7 +78,7 @@ df <- df[,poor_coverage==FALSE]
 col_to_delete <- c("id", "member_id", "funded_amnt", "funded_amnt_inv", "int_rate",
                    "installment", "emp_title", "verification_status", "issue_d",
                    "pymnt_plan", "url", "desc", "purpose", "title", "zip_code",
-                   "initial_list_status", "out_prncp", "out_prncp_inv", 
+                   "initial_list_status", "out_prncp", "out_prncp_inv",
                    "total_pymnt", "total_pymnt_inv",
                    "total_rec_prncp", "total_rec_int", "total_rec_late_fee",
                    "recoveries", "collection_recovery_fee", "last_pymnt_d",
@@ -53,11 +94,11 @@ df$emp_length <- as.numeric(df$emp_length)
 # remove '%' from revol_util
 df$revol_util <- gsub("%", "", df$revol_util)
 df$revol_util <- as.numeric(df$revol_util)
-  
+
 # average fico high and low
-df <- df %>% 
+df <- df %>%
   mutate(fico = (fico_range_high + fico_range_low) / 2) %>%
-  select(-c(fico_range_high, fico_range_low)) 
+  select(-c(fico_range_high, fico_range_low))
 
 # Remove all remaining rows with NA's
 df <- na.omit(df)
@@ -66,9 +107,10 @@ df <- na.omit(df)
 # create a good / bad column
 # bad if late more than 30 days, in default, or charged off
 bad_indicators <- c("Late (31-120 days)", "Default", "Charged Off")
-df <- df %>% 
+df <- df %>%
   mutate(is_bad = ifelse(df$loan_status %in% bad_indicators, 1, 0)) %>%
   select(-loan_status)
+
 
 # remove "months" from the term column
 df$term <- str_match(df$term, "[0123456789+]")
@@ -90,3 +132,218 @@ df$addr_state <- as.factor(df$addr_state)
 
 write.csv(df, "data/loanstats_2015_R.csv")
 ```
+
+```{r}
+## h2o random forest
+h2o.init(nthreads = -1, #Number of threads -1 means use all cores on your machine
+         max_mem_size = "16G")  #max mem size is the maximum memory to allocate to H2O
+
+data <- h2o.importFile("data/loanstats_2015_y.csv")
+
+data$is_bad <- as.factor(data$is_bad)  #encode the binary repsonse as a factor
+data$is_rent <- as.factor(data$is_rent)
+#data$addr_state <- as.factor(data$addr_state)
+#data$home_ownership <- as.factor(data$home_ownership)
+
+
+splits <- h2o.splitFrame(data = data,
+                         ratios = c(0.7, 0.15),  #partition data into 70%, 15%, 15% chunks
+                         seed = 1)  #setting a seed will guarantee reproducibility
+train <- splits[[1]]
+valid <- splits[[2]]
+test <- splits[[3]]
+
+y <- "is_bad"
+x <- setdiff(names(data), "is_bad")
+
+rf_fit <- h2o.randomForest(x = x,
+                          y = y,
+                          training_frame = train,
+                          model_id = "rf_fit",
+                          seed = 1,
+                          ntrees = 500)
+
+rf_perf <- h2o.performance(model = rf_fit,
+                           newdata = test)
+
+h2o.auc(rf_perf)
+
+rf_search_criteria <- list(strategy = "RandomDiscrete", max_models = 100)
+rf_hyper_params <- list(ntrees = c(100,200,300,400,500,600,700,800,900,1000), 
+                        mtries = c(2,3,4,5,6), max_depth = c(2,3,4,5,6,7,8,9,10))
+h2o.rf_grid <- h2o.grid("randomForest", x = x, y = y, 
+                        training_frame = train,
+                        hyper_params = rf_hyper_params,
+                        search_criteria = rf_search_criteria,
+                        seed = 3, 
+                        grid_id = "rf_grid")
+
+rf_gridperf <- h2o.getGrid(grid_id = "rf_grid",
+                           sort_by = "auc",
+                           decreasing = TRUE)
+print(rf_gridperf)
+
+```
+
+```{r}
+idx <- runif(nrow(df)) > 0.75
+train <- df[idx==FALSE,]
+test <- df[idx==TRUE,]
+y_test <- factor(test$is_bad)
+x_test <- test %>% select(-is_bad)
+
+rf_fit <- randomForest(factor(is_bad) ~ ., type="classification", data=train,
+                       importance=TRUE, na.action=na.omit)
+test_predict <- predict(rf_fit, type = "prob", newdata = x_test)
+test_roc <- roc(y_test, test_predict)
+auc_score <- performance(prediction.obj = test_predict, measure = 'auc')@y.values
+
+
+
+  # use the model to make a prediction on the independent data set
+  indep_predict <- predict(rf_fit, type = "prob", newdata = indep_set)
+
+  #AUC score
+  # wew to do: Only call performance on the test set.
+  auc_score <- performance(prediction.obj = train_predict, measure = 'auc')@y.values
+```
+####################################################################################### 
+##### yhat
+```{r}
+df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE,
+                stringsAsFactors = F, skip = 1)
+df$is_bad <- ifelse(df$loan_status %in% bad_indicators, 1,
+                         ifelse(df$loan_status == "", NA, 0))
+table(df$loan_status)
+table(df$is_bad)
+
+head(df)
+date_format <- "%b-%Y"
+df$yearmon <- as.Date(as.yearmon(df$issue_d,date_format))
+df$year_issued <- year(df$yearmon)
+df$month_issued <- month(df$yearmon)
+df$earliest_cr_line <- as.Date(as.yearmon(df$earliest_cr_line, date_format))
+df$revol_util <- str_replace_all(df$revol_util, "[%]", "")
+df$revol_util <- as.numeric(df$revol_util)
+
+outcomes <- ddply(df, .(year_issued, month_issued), function(x) {
+  c("percent_bad"=sum(x$is_bad) / nrow(x),
+    "n_loans"=nrow(x))
+})
+
+plot(outcomes$percent_bad, main="Bad Rate")
+outcomes
+```
+
+```{r}
+#figure out which columns are numeirc (and hence we can look at the distribution)
+numeric_cols <- sapply(df, is.numeric)
+#turn the data into long format (key->value esque)
+df.lng <- melt(df[,numeric_cols], id="is_bad")
+head(df.lng)
+
+#plot the distribution for bads and goods for each variable
+p <- ggplot(aes(x=value, group=is_bad, colour=factor(is_bad)), data=df.lng)
+#quick and dirty way to figure out if you have any good variables
+p + geom_density() + facet_wrap(~variable, scales="free")
+```
+
+```{r}
+df.term <- subset(df, year_issued < 2012)
+df.term$home_ownership <- factor(df.term$home_ownership)
+df.term$is_rent <- df.term$home_ownership=="RENT"
+df.term$fico_range <- factor(df.term$fico_range)
+df.term$fico_ordered <- as.numeric(df.term$fico_range)
+
+idx <- runif(nrow(df.term)) > 0.75
+train <- df.term[idx==FALSE,]
+test <- df.term[idx==TRUE,]
+
+df$is_bad <- ifelse(df$loan_status %in% bad_indicators, 1,
+                         ifelse(df$loan_status == "", NA, 0))
+table(df$loan_status)
+table(df$is_bad)
+
+head(df)
+date_format <- "%b-%Y"
+df$yearmon <- as.Date(as.yearmon(df$issue_d,date_format))
+df$year_issued <- year(as.yearmon(df$issue_d, date_format))
+df$month_issued <- month(as.yearmon(df$issue_d, date_format))
+df$earliest_cr_line <- as.Date(as.yearmon(df$earliest_cr_line, date_format))
+df$revol_util <- str_replace_all(df$revol_util, "[%]", "")
+df$revol_util <- as.numeric(df$revol_util)
+
+outcomes <- ddply(df, .(year_issued, month_issued), function(x) {
+  c("percent_bad"=sum(x$is_bad) / nrow(x),
+    "n_loans"=nrow(x))
+})
+
+plot(outcomes$percent_bad, main="Bad Rate")
+outcomes
+```
+
+```{r}
+#figure out which columns are numeirc (and hence we can look at the distribution)
+numeric_cols <- sapply(df, is.numeric)
+#turn the data into long format (key->value esque)
+df.lng <- melt(df[,numeric_cols], id="is_bad")
+head(df.lng)
+
+#plot the distribution for bads and goods for each variable
+p <- ggplot(aes(x=value, group=is_bad, colour=factor(is_bad)), data=df.lng)
+#quick and dirty way to figure out if you have any good variables
+p + geom_density() + facet_wrap(~variable, scales="free")
+```
+
+```{r}
+df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE,
+                stringsAsFactors = F, skip = 1)
+df$is_bad <- ifelse(df$loan_status %in% bad_indicators, 1,
+                         ifelse(df$loan_status == "", NA, 0))
+date_format <- "%b-%Y"
+df$yearmon <- as.Date(as.yearmon(df$issue_d,date_format))
+df$year_issued <- year(as.yearmon(df$issue_d, date_format))
+df.term <- subset(df, year_issued < 2012)
+df.term$home_ownership <- factor(df.term$home_ownership)
+df.term$is_rent <- df.term$home_ownership=="RENT"
+
+idx <- runif(nrow(df.term)) > 0.75
+train <- df.term[idx==FALSE,]
+test <- df.term[idx==TRUE,]
+
+cols <- c("last_fico_range_high", "last_fico_range_low", "pub_rec_bankruptcies", "revol_util",
+          "inq_last_6mths", "is_rent")
+train <- na.omit(train[,cols])
+
+rf <- randomForest(factor(is_bad) ~ last_fico_range_high + last_fico_range_low +
+                   pub_rec_bankruptcies + revol_util + inq_last_6mths + is_rent,
+                   type="classification", data=train, importance=TRUE, na.action=na.omit)
+
+library(ROCR)
+predictions=as.vector(rf$votes[,2])
+
+pred=prediction(predictions,target)
+
+perf_AUC=performance(pred,"auc") #Calculate the AUC value
+AUC=perf_AUC@y.values[[1]]
+
+perf_ROC=performance(pred,"tpr","fpr") #plot the actual ROC curve
+plot(perf_ROC, main="ROC plot")
+text(0.5,0.5,paste("AUC = ",format(AUC, digits=5, scientific=FALSE)))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

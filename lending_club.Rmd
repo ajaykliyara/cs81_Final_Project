@@ -135,17 +135,18 @@ write.csv(df, "data/loanstats_2015_R.csv")
 
 ```{r}
 ## h2o random forest
+# initialize the h2o engine
 h2o.init(nthreads = -1, #Number of threads -1 means use all cores on your machine
          max_mem_size = "16G")  #max mem size is the maximum memory to allocate to H2O
 
+# read the data set
 data <- h2o.importFile("data/loanstats_2015_y.csv")
 
-data$is_bad <- as.factor(data$is_bad)  #encode the binary repsonse as a factor
+# encode the factors as factors
+data$is_bad <- as.factor(data$is_bad)
 data$is_rent <- as.factor(data$is_rent)
-#data$addr_state <- as.factor(data$addr_state)
-#data$home_ownership <- as.factor(data$home_ownership)
 
-
+# split into train, validation, and test sets
 splits <- h2o.splitFrame(data = data,
                          ratios = c(0.7, 0.15),  #partition data into 70%, 15%, 15% chunks
                          seed = 1)  #setting a seed will guarantee reproducibility
@@ -153,9 +154,11 @@ train <- splits[[1]]
 valid <- splits[[2]]
 test <- splits[[3]]
 
+# Create lists which indicating independent and dependent variable names in the data
 y <- "is_bad"
 x <- setdiff(names(data), "is_bad")
 
+# Fit an individual random forest model
 rf_fit <- h2o.randomForest(x = x,
                           y = y,
                           training_frame = train,
@@ -163,14 +166,17 @@ rf_fit <- h2o.randomForest(x = x,
                           seed = 1,
                           ntrees = 500)
 
+# make a prediction with the test data and print the performance
 rf_perf <- h2o.performance(model = rf_fit,
                            newdata = test)
-
 h2o.auc(rf_perf)
 
-rf_search_criteria <- list(strategy = "RandomDiscrete", max_models = 100)
+# define a random forest search grid
+rf_search_criteria <- list(strategy = "RandomDiscrete", max_models = 25)
 rf_hyper_params <- list(ntrees = c(100,200,300,400,500,600,700,800,900,1000), 
                         mtries = c(2,3,4,5,6), max_depth = c(2,3,4,5,6,7,8,9,10))
+
+# fit the random forest search grid
 h2o.rf_grid <- h2o.grid("randomForest", x = x, y = y, 
                         training_frame = train,
                         hyper_params = rf_hyper_params,
@@ -178,11 +184,16 @@ h2o.rf_grid <- h2o.grid("randomForest", x = x, y = y,
                         seed = 3, 
                         grid_id = "rf_grid")
 
+# extract the best model from the grid
 rf_gridperf <- h2o.getGrid(grid_id = "rf_grid",
                            sort_by = "auc",
                            decreasing = TRUE)
-print(rf_gridperf)
+best_model <- h2o.getModel(rf_gridperf@model_ids[[1]])
 
+# make a prediction using the best model and the test data
+rf_perf <- h2o.performance(model = best_model,
+                           newdata = test)
+h2o.auc(rf_perf)
 ```
 
 ```{r}

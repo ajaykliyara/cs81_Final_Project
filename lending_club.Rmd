@@ -243,7 +243,7 @@ factor_cols <- c("is_bad", "zip_code", "addr_state")
 h2o.rm("rf_grid")
 
 # compute a new model with the best predictors
-best_model <- get_rf_grid(data, factor_cols, 100)
+best_model <- get_rf_grid(data, factor_cols, 2)
 
 # remove the last grid
 h2o.rm("rf_grid")
@@ -252,25 +252,18 @@ write_csv(df1, "data/loanstats_2015_optimized.csv")
 ```
 
 ```{r}
-## H2o GBM
-
+#### GBM Model
 get_gbm_grid <- function(data, factor_cols, max_num_models = 25, 
-                        class_col_name = "is_bad", in_grid_id = "gbm_grid"){
+                         class_col_name = "is_bad", in_grid_id = "gbm_grid"){
   data[,factor_cols] <- as.factor(data[,factor_cols])
   
   # split into train, validation, and test sets
-  splits <- h2o.splitFrame(data = data,
-                           ratios = c(0.7, 0.15),  #partition data into 70%, 15%, 15% chunks
-                           seed = 1)  #setting a seed will guarantee reproducibility
-  train <- splits[[1]]
-  valid <- splits[[2]]
-  test <- splits[[3]]
+  split_list <- get_splits(data, factor_cols)
   
-  # Create lists which indicate independent and dependent variable names in the data
-  y <- class_col_name
-  x <- setdiff(names(data), class_col_name)
+  # define a GBM search grid
+  rf_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
   
-  # define a random forest search grid
+  # define random search grid
   random_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
   
   # GBM hyperparamters
@@ -280,32 +273,22 @@ get_gbm_grid <- function(data, factor_cols, max_num_models = 25,
                       col_sample_rate = c(0.2, 0.5, 1.0))
   
   # Train and validate a grid of GBMs
-  gbm_grid <- h2o.grid("gbm", x = x, y = y,
+  gbm_grid <- h2o.grid("gbm", x = split_list$x, y = split_list$y,
                        grid_id = in_grid_id,
-                       training_frame = train,
-                       validation_frame = valid,
+                       training_frame = split_list$train,
+                       validation_frame = split_list$valid,
                        ntrees = 100,
                        seed = 3,
                        hyper_params = gbm_hyper_params,
-                       search_criteria = rf_search_criteria,)
+                       search_criteria = rf_search_criteria)
   
-  # Get the grid results, sorted by AUC
-  gbm_gridperf <- h2o.getGrid(grid_id = in_grid_id, 
-                              sort_by = "auc", 
-                              decreasing = TRUE)
-  print(gbm_gridperf)
-  
-  best_model <- h2o.getModel(gbm_gridperf@model_ids[[1]])
-  
-  # make a prediction using the best model and the test data
-  gbm_perf <- h2o.performance(model = best_model,
-                              newdata = test)
-  
-  cat("Best GBM Model AUC Computed on Independent Test Data: ", h2o.auc(gbm_perf))
+  best_model <- get_best_model(split_list, in_grid_id)
   
   return(best_model)
 }
 
+# sample gbm call
+# foo <- get_gbm_grid(data, factor_cols, 2)
 ```
 
 

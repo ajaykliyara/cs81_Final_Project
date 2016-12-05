@@ -22,10 +22,14 @@ library(dplyr)
 library(ROCR)
 library(pROC)
 library(h2o)
+library(caret)
+library(readr)
 ```
+
 
 ```{r}
 ############
+# Feature selection by intuition
 # read the csv data file
 df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE,
                 stringsAsFactors = F, skip = 1)
@@ -61,11 +65,33 @@ df.term <- df.term[,cols]
 write.csv(df.term, "data/loanstats_2015_y.csv")
 ```
 
+```{r}
+### Automatic feature selection with caret
+
+# ensure the results are repeatable
+set.seed(7)
+
+# define the control using a random forest selection function
+control <- rfeControl(functions=rfFuncs, method="cv", number=10)
+
+# run the RFE algorithm
+df_no_na <- na.omit(df.term)
+results <- rfe(df_no_na[,1:6], df_no_na[,7], sizes=c(1:7), rfeControl=control)
+
+# summarize the results
+print(results)
+# list the chosen features
+predictors(results)
+# plot the results
+plot(results, type=c("g", "o"))
+```
+
 
 ```{r}
+### Large data frame for feature selection
 # read the csv data file
 df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE,
-                stringsAsFactors = F, skip = 1)
+                stringsAsFactors = F)
 
 #get rid of fields that are 80% NA
 poor_coverage <- sapply(df, function(x) {
@@ -74,17 +100,16 @@ poor_coverage <- sapply(df, function(x) {
 })
 df <- df[,poor_coverage==FALSE]
 
-# delete columns that are not going to help
+# delete columns that are obviously not going to help
 col_to_delete <- c("id", "member_id", "funded_amnt", "funded_amnt_inv", "int_rate",
                    "installment", "emp_title", "verification_status", "issue_d",
-                   "pymnt_plan", "url", "desc", "purpose", "title", "zip_code",
+                   "pymnt_plan", "url", "desc", "purpose", "title",
                    "initial_list_status", "out_prncp", "out_prncp_inv",
                    "total_pymnt", "total_pymnt_inv",
                    "total_rec_prncp", "total_rec_int", "total_rec_late_fee",
                    "recoveries", "collection_recovery_fee", "last_pymnt_d",
                    "last_pymnt_amnt", "next_pymnt_d", "last_credit_pull_d",
-                   "last_fico_range_high", "last_fico_range_low", "application_type",
-                   "policy_code", "earliest_cr_line", "grade", "sub_grade")
+                   "application_type", "grade", "sub_grade", "policy_code")
 df <- df %>% select(-one_of(col_to_delete))
 
 # clean up emp_length column
@@ -95,26 +120,8 @@ df$emp_length <- as.numeric(df$emp_length)
 df$revol_util <- gsub("%", "", df$revol_util)
 df$revol_util <- as.numeric(df$revol_util)
 
-# average fico high and low
-df <- df %>%
-  mutate(fico = (fico_range_high + fico_range_low) / 2) %>%
-  select(-c(fico_range_high, fico_range_low))
-
 # Remove all remaining rows with NA's
 df <- na.omit(df)
-
-# may want to experiment with removing late
-# create a good / bad column
-# bad if late more than 30 days, in default, or charged off
-bad_indicators <- c("Late (31-120 days)", "Default", "Charged Off")
-df <- df %>%
-  mutate(is_bad = ifelse(df$loan_status %in% bad_indicators, 1, 0)) %>%
-  select(-loan_status)
-
-
-# remove "months" from the term column
-df$term <- str_match(df$term, "[0123456789+]")
-df$term <- as.numeric(df$term)
 
 # remove columns which are all zeros
 all_zeros <- sapply(df, function(x) {
@@ -126,11 +133,129 @@ all_zeros <- sapply(df, function(x) {
 })
 df <- df[,all_zeros==FALSE]
 
-# make sure all columns are numeric or factors
-df$home_ownership <- as.factor(df$home_ownership)
-df$addr_state <- as.factor(df$addr_state)
+# remove "months" from the term column
+df$term <- str_match(df$term, "[0123456789+]")
+df$term <- as.numeric(df$term)
 
-write.csv(df, "data/loanstats_2015_R.csv")
+# create a good / bad column
+# bad if late more than 30 days, in default, or charged off
+bad_indicators <- c("Late (16-30 days)", "Late (31-120 days)", "Default", "Charged Off")
+df <- df %>%
+  mutate(is_bad = ifelse(df$loan_status %in% bad_indicators, 1, 0)) %>%
+  select(-loan_status)
+
+# convert earliest credit line dates to time since epoch
+df$earliest_cr_line <- as.numeric(as.Date(as.yearmon(df$earliest_cr_line, "%b-%y")))
+
+write.csv(df, "data/loanstats_2015_large.csv")
+```
+
+```{r}
+#### Random Forest Model
+get_rf_grid <- function(data, factor_cols, max_num_models = 25, 
+                        class_col_name = "is_bad", rf_grid_id = "rf_grid"){
+  data[,factor_cols] <- as.factor(data[,factor_cols])
+  
+  # split into train, validation, and test sets
+  splits <- h2o.splitFrame(data = data,
+                           ratios = c(0.7, 0.15),  #partition data into 70%, 15%, 15% chunks
+                           seed = 1)  #setting a seed will guarantee reproducibility
+  train <- splits[[1]]
+  valid <- splits[[2]]
+  test <- splits[[3]]
+  
+  # Create lists which indicate independent and dependent variable names in the data
+  y <- class_col_name
+  x <- setdiff(names(data), class_col_name)
+  
+  # define a random forest search grid
+  rf_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
+  rf_hyper_params <- list(ntrees = c(100,200,300,400,500,600,700,800,900,1000), 
+                          mtries = c(2:(ncol(data)-1)), max_depth = c(2:20)) 
+  
+  # fit the random forest search grid
+  h2o.rf_grid <- h2o.grid("randomForest", x = x, y = y, 
+                          training_frame = train,
+                          validation_frame = valid,
+                          hyper_params = rf_hyper_params,
+                          search_criteria = rf_search_criteria,
+                          seed = 3, 
+                          grid_id = rf_grid_id)
+  
+  # extract the best model from the grid
+  rf_gridperf <- h2o.getGrid(grid_id = rf_grid_id,
+                             sort_by = "auc",
+                             decreasing = TRUE)
+  best_model <- h2o.getModel(rf_gridperf@model_ids[[1]])
+  
+  # make a prediction using the best model and the test data
+  rf_perf <- h2o.performance(model = best_model,
+                             newdata = test)
+  cat("Best Random Forest Model AUC Computed on Independent Test Data: ", h2o.auc(rf_perf))
+  
+  return(best_model)
+}
+```
+
+```{r}
+## Feature Selection with H2o
+h2o.init(nthreads = -1, #Number of threads -1 means use all cores on your machine
+        max_mem_size = "16G")  #max mem size is the maximum memory to allocate to H2O
+
+# read the data set
+df1 <- read_csv("data/loanstats_2015_large.csv")
+df1 <- df1 %>% select(-X1)
+data <- as.h2o(df1)
+
+# encode the factors as factors
+factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state")
+
+# compute the random forest model
+best_model <- get_rf_grid(data, factor_cols, 2)
+
+# predictor importance
+h2o.varimp(best_model)
+h2o.varimp_plot(best_model)
+
+# remove the last grid
+h2o.rm("rf_grid")
+
+# reduce the number of features based on the previous model results.  
+# try averaging the last fico's and removing the fico high and low
+df1 <- df1 %>% 
+  mutate(fico = (last_fico_range_high + last_fico_range_low) / 2) %>%
+  select(-c(fico_range_high, fico_range_low, last_fico_range_high, 
+            last_fico_range_low))
+
+# create a new h2o data frame
+data <- as.h2o(df1)
+
+# compute a new random forest model
+best_model <- get_rf_grid(data, factor_cols, 2)
+
+# print predictor importance and make a plot
+h2o.varimp(best_model)
+h2o.varimp_plot(best_model)
+
+# select the best 12 predictors
+best_predictors <- h2o.varimp(best_model)$variable
+best_predictors <- best_predictors[1:12]
+best_predictors <- append(best_predictors, c("is_bad"))
+bar <- select_(df1, .dots = best_predictors)
+
+# re-encode the factors removing home_ownership
+factor_cols <- c("is_bad", "zip_code", "addr_state")
+
+# remove the last grid 
+h2o.rm("rf_grid")
+
+# compute a new model with the best predictors
+best_model <- get_rf_grid(data, factor_cols, 500)
+
+# remove the last grid
+h2o.rm("rf_grid")
+
+write_csv(df1, "data/loanstats_2015_optimized.csv")
 ```
 
 ```{r}
@@ -141,6 +266,9 @@ h2o.init(nthreads = -1, #Number of threads -1 means use all cores on your machin
 
 # read the data set
 data <- h2o.importFile("data/loanstats_2015_y.csv")
+
+# remove the index column
+h2o.removeVecs(data, "C1")
 
 # encode the factors as factors
 data$is_bad <- as.factor(data$is_bad)
@@ -190,10 +318,11 @@ rf_gridperf <- h2o.getGrid(grid_id = "rf_grid",
                            decreasing = TRUE)
 best_model <- h2o.getModel(rf_gridperf@model_ids[[1]])
 
-# make a prediction using the best model and the test data
-rf_perf <- h2o.performance(model = best_model,
-                           newdata = test)
-h2o.auc(rf_perf)
+# predictor importance
+h2o.varimp(best_model)
+h2o.varimp_plot(best_model)
+
+
 ```
 
 ```{r}

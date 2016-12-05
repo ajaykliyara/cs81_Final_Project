@@ -140,7 +140,6 @@ get_splits <- function(data, factor_cols, class_col_name = "is_bad"){
 
 ```
 
-
 ```{r}
 ## get_best_model
 get_best_model <- function(split_list, grid_id){
@@ -164,14 +163,14 @@ get_best_model <- function(split_list, grid_id){
 ```{r}
 #### Random Forest Model
 get_rf_grid <- function(data, factor_cols, max_num_models = 25, 
-                        class_col_name = "is_bad", rf_grid_id = "rf_grid"){
+                        class_col_name = "is_bad", in_grid_id = "rf_grid"){
   data[,factor_cols] <- as.factor(data[,factor_cols])
   
   # split into train, validation, and test sets
   split_list <- get_splits(data, factor_cols)
   
   # define a random forest search grid
-  rf_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
+  random_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
   rf_hyper_params <- list(ntrees = c(100,200,300,400,500,600,700,800,900,1000), 
                           mtries = c(2:(ncol(data)-1)), max_depth = c(2:20)) 
   
@@ -180,11 +179,11 @@ get_rf_grid <- function(data, factor_cols, max_num_models = 25,
                           training_frame = split_list$train,
                           validation_frame = split_list$valid,
                           hyper_params = rf_hyper_params,
-                          search_criteria = rf_search_criteria,
+                          search_criteria = random_search_criteria,
                           seed = 3, 
-                          grid_id = rf_grid_id)
+                          grid_id = in_grid_id)
   
-  best_model <- get_best_model(split_list, rf_grid_id)
+  best_model <- get_best_model(split_list, in_grid_id)
   
   return(best_model)
 }
@@ -260,9 +259,6 @@ get_gbm_grid <- function(data, factor_cols, max_num_models = 25,
   # split into train, validation, and test sets
   split_list <- get_splits(data, factor_cols)
   
-  # define a GBM search grid
-  rf_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
-  
   # define random search grid
   random_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
   
@@ -280,18 +276,51 @@ get_gbm_grid <- function(data, factor_cols, max_num_models = 25,
                        ntrees = 100,
                        seed = 3,
                        hyper_params = gbm_hyper_params,
-                       search_criteria = rf_search_criteria)
+                       search_criteria = random_search_criteria)
   
   best_model <- get_best_model(split_list, in_grid_id)
   
   return(best_model)
 }
 
+h2o.rm("gbm_grid")
+
 # sample gbm call
-# foo <- get_gbm_grid(data, factor_cols, 2)
+# gbm_model <- get_gbm_grid(data, factor_cols, 2)
 ```
 
 
+```{r}
+#### GLM Model
+get_glm <- function(data, factor_cols, 
+                    class_col_name = "is_bad", 
+                    in_model_id = "glm"){
+  data[,factor_cols] <- as.factor(data[,factor_cols])
+  
+  # split into train, validation, and test sets
+  split_list <- get_splits(data, factor_cols)
+  
+  # GLM hyperparamters
+  glm_fit <- h2o.glm(x = split_list$x, 
+                     y = split_list$y, 
+                     training_frame = split_list$train,
+                     model_id = in_model_id,
+                     validation_frame = split_list$valid,
+                     family = "binomial",
+                     lambda_search = TRUE)
+  
+  glm_perf <- h2o.performance(model = glm_fit,
+                              newdata = split_list$test)
+  cat(in_model_id, " AUC: ", h2o.auc(glm_perf))
+  
+  return(glm_fit)
+}
+
+h2o.rm("glm_grid")
+
+# sample gbm call
+# glm_model <- get_glm(data, factor_cols)
+```
 
 
 

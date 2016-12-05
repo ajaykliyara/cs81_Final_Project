@@ -26,45 +26,6 @@ library(caret)
 library(readr)
 ```
 
-
-```{r}
-############
-# Feature selection by intuition
-# read the csv data file
-df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE,
-                stringsAsFactors = F, skip = 1)
-
-#get rid of fields that are 80% NA
-poor_coverage <- sapply(df, function(x) {
-  coverage <- 1 - sum(is.na(x)) / length(x)
-  coverage < 0.8
-})
-df <- df[,poor_coverage==FALSE]
-
-bad_indicators <- c("Late (31-120 days)", "Default", "Charged Off")
-df <- df %>%
-  mutate(is_bad = ifelse(df$loan_status %in% bad_indicators, 1, 0)) %>%
-  select(-loan_status)
-
-date_format <- "%b-%Y"
-df$yearmon <- as.Date(as.yearmon(df$issue_d,date_format))
-df$year_issued <- year(df$yearmon)
-
-# remove '%' from revol_util
-df$revol_util <- gsub("%", "", df$revol_util)
-df$revol_util <- as.numeric(df$revol_util)
-
-df.term <- subset(df.term, year_issued < 2012)
-df.term$home_ownership <- factor(df.term$home_ownership)
-df.term$is_rent <- df.term$home_ownership=="RENT"
-
-cols <- c("last_fico_range_high", "last_fico_range_low", "pub_rec_bankruptcies", "revol_util",
-          "inq_last_6mths", "is_rent", "is_bad")
-df.term <- df.term[,cols]
-
-write.csv(df.term, "data/loanstats_2015_y.csv")
-```
-
 ```{r}
 ### Automatic feature selection with caret
 
@@ -151,9 +112,8 @@ write.csv(df, "data/loanstats_2015_large.csv")
 ```
 
 ```{r}
-#### Random Forest Model
-get_rf_grid <- function(data, factor_cols, max_num_models = 25, 
-                        class_col_name = "is_bad", rf_grid_id = "rf_grid"){
+## get_splits
+get_splits <- function(data, factor_cols, class_col_name = "is_bad"){
   data[,factor_cols] <- as.factor(data[,factor_cols])
   
   # split into train, validation, and test sets
@@ -168,30 +128,63 @@ get_rf_grid <- function(data, factor_cols, max_num_models = 25,
   y <- class_col_name
   x <- setdiff(names(data), class_col_name)
   
+  # package up the return values
+  split_list <- list()
+  split_list$train <- train
+  split_list$valid <- valid
+  split_list$test <- test
+  split_list$x <- x
+  split_list$y <- y
+  return(split_list)
+}
+
+```
+
+
+```{r}
+## get_best_model
+get_best_model <- function(split_list, grid_id){
+  # extract the best model from the grid
+  gridperf <- h2o.getGrid(grid_id = grid_id,
+                          sort_by = "auc",
+                          decreasing = TRUE)
+  
+  best_model <- h2o.getModel(gridperf@model_ids[[1]])
+  
+  # make a prediction using the best model and the test data
+  perf <- h2o.performance(model = best_model,
+                          newdata = split_list$test)
+  
+  cat(grid_id, " AUC: ", h2o.auc(perf))
+  
+  return(best_model)
+}
+```
+
+```{r}
+#### Random Forest Model
+get_rf_grid <- function(data, factor_cols, max_num_models = 25, 
+                        class_col_name = "is_bad", rf_grid_id = "rf_grid"){
+  data[,factor_cols] <- as.factor(data[,factor_cols])
+  
+  # split into train, validation, and test sets
+  split_list <- get_splits(data, factor_cols)
+  
   # define a random forest search grid
   rf_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
   rf_hyper_params <- list(ntrees = c(100,200,300,400,500,600,700,800,900,1000), 
                           mtries = c(2:(ncol(data)-1)), max_depth = c(2:20)) 
   
   # fit the random forest search grid
-  h2o.rf_grid <- h2o.grid("randomForest", x = x, y = y, 
-                          training_frame = train,
-                          validation_frame = valid,
+  h2o.rf_grid <- h2o.grid("randomForest", x = split_list$x, y = split_list$y, 
+                          training_frame = split_list$train,
+                          validation_frame = split_list$valid,
                           hyper_params = rf_hyper_params,
                           search_criteria = rf_search_criteria,
                           seed = 3, 
                           grid_id = rf_grid_id)
   
-  # extract the best model from the grid
-  rf_gridperf <- h2o.getGrid(grid_id = rf_grid_id,
-                             sort_by = "auc",
-                             decreasing = TRUE)
-  best_model <- h2o.getModel(rf_gridperf@model_ids[[1]])
-  
-  # make a prediction using the best model and the test data
-  rf_perf <- h2o.performance(model = best_model,
-                             newdata = test)
-  cat("Best Random Forest Model AUC Computed on Independent Test Data: ", h2o.auc(rf_perf))
+  best_model <- get_best_model(split_list, rf_grid_id)
   
   return(best_model)
 }
@@ -250,7 +243,7 @@ factor_cols <- c("is_bad", "zip_code", "addr_state")
 h2o.rm("rf_grid")
 
 # compute a new model with the best predictors
-best_model <- get_rf_grid(data, factor_cols, 500)
+best_model <- get_rf_grid(data, factor_cols, 100)
 
 # remove the last grid
 h2o.rm("rf_grid")
@@ -259,95 +252,62 @@ write_csv(df1, "data/loanstats_2015_optimized.csv")
 ```
 
 ```{r}
-## h2o random forest
-# initialize the h2o engine
-h2o.init(nthreads = -1, #Number of threads -1 means use all cores on your machine
-         max_mem_size = "16G")  #max mem size is the maximum memory to allocate to H2O
+## H2o GBM
 
-# read the data set
-data <- h2o.importFile("data/loanstats_2015_y.csv")
-
-# remove the index column
-h2o.removeVecs(data, "C1")
-
-# encode the factors as factors
-data$is_bad <- as.factor(data$is_bad)
-data$is_rent <- as.factor(data$is_rent)
-
-# split into train, validation, and test sets
-splits <- h2o.splitFrame(data = data,
-                         ratios = c(0.7, 0.15),  #partition data into 70%, 15%, 15% chunks
-                         seed = 1)  #setting a seed will guarantee reproducibility
-train <- splits[[1]]
-valid <- splits[[2]]
-test <- splits[[3]]
-
-# Create lists which indicating independent and dependent variable names in the data
-y <- "is_bad"
-x <- setdiff(names(data), "is_bad")
-
-# Fit an individual random forest model
-rf_fit <- h2o.randomForest(x = x,
-                          y = y,
-                          training_frame = train,
-                          model_id = "rf_fit",
-                          seed = 1,
-                          ntrees = 500)
-
-# make a prediction with the test data and print the performance
-rf_perf <- h2o.performance(model = rf_fit,
-                           newdata = test)
-h2o.auc(rf_perf)
-
-# define a random forest search grid
-rf_search_criteria <- list(strategy = "RandomDiscrete", max_models = 25)
-rf_hyper_params <- list(ntrees = c(100,200,300,400,500,600,700,800,900,1000), 
-                        mtries = c(2,3,4,5,6), max_depth = c(2,3,4,5,6,7,8,9,10))
-
-# fit the random forest search grid
-h2o.rf_grid <- h2o.grid("randomForest", x = x, y = y, 
-                        training_frame = train,
-                        hyper_params = rf_hyper_params,
-                        search_criteria = rf_search_criteria,
-                        seed = 3, 
-                        grid_id = "rf_grid")
-
-# extract the best model from the grid
-rf_gridperf <- h2o.getGrid(grid_id = "rf_grid",
-                           sort_by = "auc",
-                           decreasing = TRUE)
-best_model <- h2o.getModel(rf_gridperf@model_ids[[1]])
-
-# predictor importance
-h2o.varimp(best_model)
-h2o.varimp_plot(best_model)
-
+get_gbm_grid <- function(data, factor_cols, max_num_models = 25, 
+                        class_col_name = "is_bad", in_grid_id = "gbm_grid"){
+  data[,factor_cols] <- as.factor(data[,factor_cols])
+  
+  # split into train, validation, and test sets
+  splits <- h2o.splitFrame(data = data,
+                           ratios = c(0.7, 0.15),  #partition data into 70%, 15%, 15% chunks
+                           seed = 1)  #setting a seed will guarantee reproducibility
+  train <- splits[[1]]
+  valid <- splits[[2]]
+  test <- splits[[3]]
+  
+  # Create lists which indicate independent and dependent variable names in the data
+  y <- class_col_name
+  x <- setdiff(names(data), class_col_name)
+  
+  # define a random forest search grid
+  random_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
+  
+  # GBM hyperparamters
+  gbm_hyper_params <- list(learn_rate = c(0.01, 0.1),
+                      max_depth = c(3, 5, 9),
+                      sample_rate = c(0.8, 1.0),
+                      col_sample_rate = c(0.2, 0.5, 1.0))
+  
+  # Train and validate a grid of GBMs
+  gbm_grid <- h2o.grid("gbm", x = x, y = y,
+                       grid_id = in_grid_id,
+                       training_frame = train,
+                       validation_frame = valid,
+                       ntrees = 100,
+                       seed = 3,
+                       hyper_params = gbm_hyper_params,
+                       search_criteria = rf_search_criteria,)
+  
+  # Get the grid results, sorted by AUC
+  gbm_gridperf <- h2o.getGrid(grid_id = in_grid_id, 
+                              sort_by = "auc", 
+                              decreasing = TRUE)
+  print(gbm_gridperf)
+  
+  best_model <- h2o.getModel(gbm_gridperf@model_ids[[1]])
+  
+  # make a prediction using the best model and the test data
+  gbm_perf <- h2o.performance(model = best_model,
+                              newdata = test)
+  
+  cat("Best GBM Model AUC Computed on Independent Test Data: ", h2o.auc(gbm_perf))
+  
+  return(best_model)
+}
 
 ```
 
-```{r}
-########### R Random Forest
-idx <- runif(nrow(df)) > 0.75
-train <- df[idx==FALSE,]
-test <- df[idx==TRUE,]
-y_test <- factor(test$is_bad)
-x_test <- test %>% select(-is_bad)
-
-rf_fit <- randomForest(factor(is_bad) ~ ., type="classification", data=train,
-                       importance=TRUE, na.action=na.omit)
-test_predict <- predict(rf_fit, type = "prob", newdata = x_test)
-test_roc <- roc(y_test, test_predict)
-auc_score <- performance(prediction.obj = test_predict, measure = 'auc')@y.values
-
-
-
-  # use the model to make a prediction on the independent data set
-  indep_predict <- predict(rf_fit, type = "prob", newdata = indep_set)
-
-  #AUC score
-  # wew to do: Only call performance on the test set.
-  auc_score <- performance(prediction.obj = train_predict, measure = 'auc')@y.values
-```
 
 
 

@@ -300,7 +300,7 @@ get_glm <- function(data, factor_cols,
   # split into train, validation, and test sets
   split_list <- get_splits(data, factor_cols)
   
-  # GLM hyperparamters
+  # Train the GLM Model
   glm_fit <- h2o.glm(x = split_list$x, 
                      y = split_list$y, 
                      training_frame = split_list$train,
@@ -316,13 +316,40 @@ get_glm <- function(data, factor_cols,
   return(glm_fit)
 }
 
-h2o.rm("glm_grid")
+# h2o.rm("glm")
 
 # sample gbm call
 # glm_model <- get_glm(data, factor_cols)
 ```
 
+```{r}
+#### Naive Bayes Model
+get_nb <- function(data, factor_cols, 
+                   class_col_name = "is_bad", 
+                   in_model_id = "naive_bayes"){
+  data[,factor_cols] <- as.factor(data[,factor_cols])
+  
+  # split into train, validation, and test sets
+  split_list <- get_splits(data, factor_cols)
+  
+  # Train the NB model
+  nb_fit <- h2o.naiveBayes(x = split_list$x,
+                           y = split_list$y,
+                           training_frame = split_list$train,
+                           model_id = in_model_id)
+  
+  nb_perf <- h2o.performance(model = nb_fit,
+                              newdata = split_list$test)
+  cat(in_model_id, " AUC: ", h2o.auc(nb_perf))
+  
+  return(nb_fit)
+}
 
+# h2o.rm("naive_bayes")
+
+# sample naive bayes call
+# nb_model <- get_nb(data, factor_cols)
+```
 
 
 

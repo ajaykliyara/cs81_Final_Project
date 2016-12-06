@@ -24,6 +24,14 @@ library(pROC)
 library(h2o)
 library(caret)
 library(readr)
+library(h2oEnsemble)
+library(cvAUC)
+```
+
+```{r}
+## Start the H2o engine
+h2o.init(nthreads = -1, #Number of threads -1 means use all cores on your machine
+        max_mem_size = "16G")  #max mem size is the maximum memory to allocate to H2O
 ```
 
 ```{r}
@@ -172,7 +180,7 @@ get_rf_grid <- function(data, factor_cols, max_num_models = 25,
   # define a random forest search grid
   random_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
   rf_hyper_params <- list(ntrees = c(100,200,300,400,500,600,700,800,900,1000), 
-                          mtries = c(2:(ncol(data)-1)), max_depth = c(2:20)) 
+                          mtries = c(2:(length(split_list$x)-1)), max_depth = c(2:20)) 
   
   # fit the random forest search grid
   h2o.rf_grid <- h2o.grid("randomForest", x = split_list$x, y = split_list$y, 
@@ -191,9 +199,6 @@ get_rf_grid <- function(data, factor_cols, max_num_models = 25,
 
 ```{r}
 ## Feature Selection with H2o
-h2o.init(nthreads = -1, #Number of threads -1 means use all cores on your machine
-        max_mem_size = "16G")  #max mem size is the maximum memory to allocate to H2O
-
 # read the data set
 df1 <- read_csv("data/loanstats_2015_large.csv")
 df1 <- df1 %>% select(-X1)
@@ -229,25 +234,41 @@ best_model <- get_rf_grid(data, factor_cols, 2)
 h2o.varimp(best_model)
 h2o.varimp_plot(best_model)
 
-# select the best 12 predictors
+# select the best 12 predictors (home ownership no longer included)
 best_predictors <- h2o.varimp(best_model)$variable
 best_predictors <- best_predictors[1:12]
 best_predictors <- append(best_predictors, c("is_bad"))
-bar <- select_(df1, .dots = best_predictors)
+df1 <- select_(df1, .dots = best_predictors)
 
 # re-encode the factors removing home_ownership
 factor_cols <- c("is_bad", "zip_code", "addr_state")
+
+# save the optimized data
+write_csv(df1, "data/loanstats_2015_optimized.csv")
 
 # remove the last grid 
 h2o.rm("rf_grid")
 
 # compute a new model with the best predictors
-best_model <- get_rf_grid(data, factor_cols, 2)
+data <- as.h2o(df1)
+rf_model <- get_rf_grid(data, factor_cols)
 
 # remove the last grid
 h2o.rm("rf_grid")
 
-write_csv(df1, "data/loanstats_2015_optimized.csv")
+# print predictor importance and make a plot
+h2o.varimp(rf_model)
+h2o.varimp_plot(rf_model)
+```
+
+```{r}
+## Read in the optimized data set
+# save the optimized data
+df1 <- read_csv("data/loanstats_2015_optimized.csv")
+data <- as.h2o(df1)
+
+# set up the factor list indicating what columns are factors in df1
+factor_cols <- c("is_bad", "zip_code", "addr_state")
 ```
 
 ```{r}
@@ -264,16 +285,16 @@ get_gbm_grid <- function(data, factor_cols, max_num_models = 25,
   
   # GBM hyperparamters
   gbm_hyper_params <- list(learn_rate = c(0.01, 0.1),
-                      max_depth = c(3, 5, 9),
-                      sample_rate = c(0.8, 1.0),
-                      col_sample_rate = c(0.2, 0.5, 1.0))
+                      max_depth = c(seq(3, 15, 2)),
+                      sample_rate = c(seq(.5, 1, .1)),
+                      col_sample_rate = c(seq(.2, 1, .1)),
+                      ntrees = c(seq(100, 500, 50)))
   
   # Train and validate a grid of GBMs
   gbm_grid <- h2o.grid("gbm", x = split_list$x, y = split_list$y,
                        grid_id = in_grid_id,
                        training_frame = split_list$train,
                        validation_frame = split_list$valid,
-                       ntrees = 100,
                        seed = 3,
                        hyper_params = gbm_hyper_params,
                        search_criteria = random_search_criteria)
@@ -285,8 +306,8 @@ get_gbm_grid <- function(data, factor_cols, max_num_models = 25,
 
 h2o.rm("gbm_grid")
 
-# sample gbm call
-# gbm_model <- get_gbm_grid(data, factor_cols, 2)
+# build the gbm model
+gbm_model <- get_gbm_grid(data, factor_cols, 50)
 ```
 
 
@@ -316,10 +337,10 @@ get_glm <- function(data, factor_cols,
   return(glm_fit)
 }
 
-# h2o.rm("glm")
+h2o.rm("glm")
 
-# sample gbm call
-# glm_model <- get_glm(data, factor_cols)
+# build the gbm model
+glm_model <- get_glm(data, factor_cols)
 ```
 
 ```{r}
@@ -345,12 +366,84 @@ get_nb <- function(data, factor_cols,
   return(nb_fit)
 }
 
-# h2o.rm("naive_bayes")
+h2o.rm("naive_bayes")
 
-# sample naive bayes call
-# nb_model <- get_nb(data, factor_cols)
+# build the naive bayes model
+nb_model <- get_nb(data, factor_cols)
 ```
 
+```{r}
+#### Deep Learning Model
+get_dl_grid <- function(data, factor_cols, in_max_run_time_sec = 0, 
+                        max_epochs = 1000000, class_col_name = "is_bad", 
+                        in_grid_id = "dl_grid"){
+  data[,factor_cols] <- as.factor(data[,factor_cols])
+  
+  # split into train, validation, and test sets
+  split_list <- get_splits(data, factor_cols)
+  
+  # Deeplearning hyperparamters
+  activation_opt <- c("Rectifier", "RectifierWithDropout", "Maxout", "MaxoutWithDropout", "Tanh")
+  l1_opt <- c(0, 0.00001, 0.0001, 0.001, 0.01, 0.1)
+  l2_opt <- c(0, 0.00001, 0.0001, 0.001, 0.01, 0.1)
+  hyper_params <- list(activation = activation_opt,
+                       l1 = l1_opt,
+                       l2 = l2_opt)
+  search_criteria <- list(strategy = "RandomDiscrete", max_runtime_secs = in_max_run_time_sec)
+  
+  # Train and validate the deep learning grid
+  dl_grid <- h2o.grid("deeplearning", x = split_list$x, y = split_list$y,
+                      grid_id = "dl_grid",
+                      training_frame = split_list$train,
+                      validation_frame = split_list$valid,
+                      seed = 3,
+                      hidden = c(10, 10, 10),
+                      hyper_params = hyper_params,
+                      search_criteria = search_criteria,
+                      epochs = max_epochs,
+                      stopping_rounds = 2,
+                      stopping_metric = "misclassification",
+                      stopping_tolerance = 0.01)
+  
+  best_model <- get_best_model(split_list, in_grid_id)
+  
+  return(best_model)
+}
+
+h2o.rm("dl_grid")
+
+# build the deep learning model
+dl_model <- get_dl_grid(data, factor_cols)
+```
+
+
+```{r}
+# split into train, validation, and test sets
+split_list <- get_splits(data, factor_cols)
+
+### ensemble stacking
+learner <- c("h2o.glm.wrapper", "h2o.randomForest.wrapper", 
+             "h2o.gbm.wrapper", "h2o.deeplearning.wrapper")
+metalearner <- "h2o.glm.wrapper"
+
+#### Train an Ensemble
+#Train the ensemble (using 5-fold internal CV) to generate the level-one data.  Note that more CV folds will take longer to train, but should increase performance.
+fit <- h2o.ensemble(x = split_list$x, y = split_list$y, 
+                    training_frame = split_list$train, 
+                    family = "binomial", 
+                    learner = learner, 
+                    metalearner = metalearner,
+                    cvControl = list(V = 5))
+
+#### Predict 
+#Generate predictions on the test set.
+pred <- predict(fit, split_list$test)
+predictions <- as.data.frame(pred$pred)[,3]  #third column is P(Y==1)
+labels <- as.data.frame(split_list$test[,split_list$y])[,1]
+
+# AUC
+cvAUC::AUC(predictions = predictions, labels = labels)
+```
 
 
 

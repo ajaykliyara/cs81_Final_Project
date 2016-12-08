@@ -26,33 +26,13 @@ library(caret)
 library(readr)
 library(h2oEnsemble)
 library(cvAUC)
+library(syuzhet)
 ```
 
 ```{r}
 ## Start the H2o engine
 h2o.init(nthreads = -1, #Number of threads -1 means use all cores on your machine
-        max_mem_size = "16G")  #max mem size is the maximum memory to allocate to H2O
-```
-
-```{r}
-### Automatic feature selection with caret
-
-# ensure the results are repeatable
-set.seed(7)
-
-# define the control using a random forest selection function
-control <- rfeControl(functions=rfFuncs, method="cv", number=10)
-
-# run the RFE algorithm
-df_no_na <- na.omit(df.term)
-results <- rfe(df_no_na[,1:6], df_no_na[,7], sizes=c(1:7), rfeControl=control)
-
-# summarize the results
-print(results)
-# list the chosen features
-predictors(results)
-# plot the results
-plot(results, type=c("g", "o"))
+         max_mem_size = "16G")  #max mem size is the maximum memory to allocate to H2O
 ```
 
 
@@ -62,32 +42,47 @@ plot(results, type=c("g", "o"))
 df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE,
                 stringsAsFactors = F)
 
-#get rid of fields that are 80% NA
-poor_coverage <- sapply(df, function(x) {
-  coverage <- 1 - sum(is.na(x)) / length(x)
-  coverage < 0.8
-})
-df <- df[,poor_coverage==FALSE]
+orig_col<- c("loan_amnt", "purpose", "grade", "sub_grade", "int_rate", "term", "installment", "home_ownership",
+             "title", "emp_length", "annual_inc", "dti", "zip_code", "addr_state", "fico_range_low", 
+             "fico_range_high", "earliest_cr_line", "open_acc", "total_acc", "revol_bal", "revol_util",
+             "inq_last_6mths", "acc_now_delinq", "delinq_amnt", "delinq_2yrs", "mths_since_last_delinq", 
+             "pub_rec", "mths_since_last_record",  "mths_since_last_major_derog", "collections_12_mths_ex_med",
+             "loan_status", "desc")
+df <- df %>% select(one_of(orig_col))
 
-# delete columns that are obviously not going to help
-col_to_delete <- c("id", "member_id", "funded_amnt", "funded_amnt_inv", "int_rate",
-                   "installment", "emp_title", "verification_status", "issue_d",
-                   "pymnt_plan", "url", "desc", "purpose", "title",
-                   "initial_list_status", "out_prncp", "out_prncp_inv",
-                   "total_pymnt", "total_pymnt_inv",
-                   "total_rec_prncp", "total_rec_int", "total_rec_late_fee",
-                   "recoveries", "collection_recovery_fee", "last_pymnt_d",
-                   "last_pymnt_amnt", "next_pymnt_d", "last_credit_pull_d",
-                   "application_type", "grade", "sub_grade", "policy_code")
+# columns to delete
+col_to_delete <- c("purpose", "title", "collections_12_mths_ex_med", "mths_since_last_major_derog")
 df <- df %>% select(-one_of(col_to_delete))
 
 # clean up emp_length column
 df$emp_length <- str_match(df$emp_length, "[0123456789+]")
 df$emp_length <- as.numeric(df$emp_length)
 
-# remove '%' from revol_util
+# remove '%' from revol_util and int_rate
 df$revol_util <- gsub("%", "", df$revol_util)
 df$revol_util <- as.numeric(df$revol_util)
+df$int_rate <- gsub("%", "", df$int_rate)
+df$int_rate <- as.numeric(df$int_rate)
+
+# clean up NA's
+# what columns have na values??
+na_col_list <- list()
+i <- 1
+for (col in names(df)){
+  num_na <- sum(is.na(df[, col]))
+  if (num_na > 0){
+    cat(col, ": ", num_na, "\n")
+    na_col_list[i] <- col
+    i <- i + 1
+  }
+}
+
+# mths_since_last_delinq, emp_length
+df <- df %>%
+  mutate(mths_since_last_delinq = ifelse(is.na(mths_since_last_delinq), 0, mths_since_last_delinq)) %>%
+  mutate(emp_length = ifelse(is.na(emp_length), 0, emp_length)) %>%
+  mutate(open_acc = ifelse(is.na(open_acc), 0, open_acc)) %>%
+  mutate(mths_since_last_record = ifelse(is.na(mths_since_last_record), 0, mths_since_last_record))
 
 # Remove all remaining rows with NA's
 df <- na.omit(df)
@@ -106,9 +101,14 @@ df <- df[,all_zeros==FALSE]
 df$term <- str_match(df$term, "[0123456789+]")
 df$term <- as.numeric(df$term)
 
+# add description sentiment column
+df <- df %>%
+  mutate(sentiment = as.numeric(get_sentiment(desc))) %>%
+  select(-one_of("desc"))
+
 # create a good / bad column
 # bad if late more than 30 days, in default, or charged off
-bad_indicators <- c("Late (16-30 days)", "Late (31-120 days)", "Default", "Charged Off")
+bad_indicators <- c("Default", "Charged Off", "Late (31-120 days)", "Does not meet the credit policy. Status:Charged Off")
 df <- df %>%
   mutate(is_bad = ifelse(df$loan_status %in% bad_indicators, 1, 0)) %>%
   select(-loan_status)
@@ -171,7 +171,8 @@ get_best_model <- function(split_list, grid_id){
 ```{r}
 #### Random Forest Model
 get_rf_grid <- function(data, factor_cols, max_num_models = 25, 
-                        class_col_name = "is_bad", in_grid_id = "rf_grid"){
+                        class_col_name = "is_bad", in_grid_id = "rf_grid",
+                        in_balance_classes = FALSE){
   data[,factor_cols] <- as.factor(data[,factor_cols])
   
   # split into train, validation, and test sets
@@ -180,7 +181,8 @@ get_rf_grid <- function(data, factor_cols, max_num_models = 25,
   # define a random forest search grid
   random_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
   rf_hyper_params <- list(ntrees = c(100,200,300,400,500,600,700,800,900,1000), 
-                          mtries = c(2:(length(split_list$x)-1)), max_depth = c(2:20)) 
+                          mtries = c(2:(length(split_list$x)-1)), max_depth = c(2:20),
+                          balance_classes = in_balance_classes) 
   
   # fit the random forest search grid
   h2o.rf_grid <- h2o.grid("randomForest", x = split_list$x, y = split_list$y, 
@@ -202,63 +204,32 @@ get_rf_grid <- function(data, factor_cols, max_num_models = 25,
 # read the data set
 df1 <- read_csv("data/loanstats_2015_large.csv")
 df1 <- df1 %>% select(-X1)
-data <- as.h2o(df1)
 
 # encode the factors as factors
-factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state")
+factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state", "grade", "sub_grade")
+
+# create an h2o data frame
+data <- as.h2o(df1)
 
 # compute the random forest model
-best_model <- get_rf_grid(data, factor_cols, 2)
+h2o.rm("rf_grid")
+best_model <- get_rf_grid(data, factor_cols, 4)
 
 # predictor importance
 h2o.varimp(best_model)
 h2o.varimp_plot(best_model)
 
-# remove the last grid
-h2o.rm("rf_grid")
-
-# reduce the number of features based on the previous model results.  
-# try averaging the last fico's and removing the fico high and low
-df1 <- df1 %>% 
-  mutate(fico = (last_fico_range_high + last_fico_range_low) / 2) %>%
-  select(-c(fico_range_high, fico_range_low, last_fico_range_high, 
-            last_fico_range_low))
-
-# create a new h2o data frame
-data <- as.h2o(df1)
-
-# compute a new random forest model
-best_model <- get_rf_grid(data, factor_cols, 2)
-
-# print predictor importance and make a plot
-h2o.varimp(best_model)
-h2o.varimp_plot(best_model)
-
-# select the best 12 predictors (home ownership no longer included)
+# select the best 16 predictors (home ownership no longer included)
 best_predictors <- h2o.varimp(best_model)$variable
-best_predictors <- best_predictors[1:12]
+best_predictors <- best_predictors[1:16]
 best_predictors <- append(best_predictors, c("is_bad"))
 df1 <- select_(df1, .dots = best_predictors)
-
-# re-encode the factors removing home_ownership
-factor_cols <- c("is_bad", "zip_code", "addr_state")
 
 # save the optimized data
 write_csv(df1, "data/loanstats_2015_optimized.csv")
 
-# remove the last grid 
-h2o.rm("rf_grid")
-
-# compute a new model with the best predictors
-data <- as.h2o(df1)
-rf_model <- get_rf_grid(data, factor_cols)
-
 # remove the last grid
 h2o.rm("rf_grid")
-
-# print predictor importance and make a plot
-h2o.varimp(rf_model)
-h2o.varimp_plot(rf_model)
 ```
 
 ```{r}
@@ -267,8 +238,16 @@ h2o.varimp_plot(rf_model)
 df1 <- read_csv("data/loanstats_2015_optimized.csv")
 data <- as.h2o(df1)
 
-# set up the factor list indicating what columns are factors in df1
-factor_cols <- c("is_bad", "zip_code", "addr_state")
+# re-encode the factors removing home_ownership
+factor_cols <- c("is_bad", "zip_code", "addr_state", "grade", "sub_grade")
+```
+
+
+```{r}
+## Random Forest Model
+h2o.rm("rf_model")
+rf_model <- get_rf_grid(data, factor_cols, 25)
+h2o.varimp_plot(rf_model)
 ```
 
 ```{r}
@@ -376,20 +355,25 @@ nb_model <- get_nb(data, factor_cols)
 #### Deep Learning Model
 get_dl_grid <- function(data, factor_cols, in_max_run_time_sec = 0, 
                         max_epochs = 1000000, class_col_name = "is_bad", 
-                        in_grid_id = "dl_grid"){
+                        in_grid_id = "dl_grid", in_max_runtime_secs = 0){
   data[,factor_cols] <- as.factor(data[,factor_cols])
   
   # split into train, validation, and test sets
   split_list <- get_splits(data, factor_cols)
   
   # Deeplearning hyperparamters
-  activation_opt <- c("Rectifier", "RectifierWithDropout", "Maxout", "MaxoutWithDropout", "Tanh")
+  activation_opt <- c("Rectifier", "Tanh", "TanhWithDropout", "RectifierWithDropout", 
+                      "Maxout", "MaxoutWithDropout")
   l1_opt <- c(0, 0.00001, 0.0001, 0.001, 0.01, 0.1)
   l2_opt <- c(0, 0.00001, 0.0001, 0.001, 0.01, 0.1)
+  hidden_layers = list(c(8,8), c(10,10),c(12,12), c(14,14), c(8,8,8),
+                       c(10,10,10), c(12,12,12), c(14,14,14))
   hyper_params <- list(activation = activation_opt,
                        l1 = l1_opt,
-                       l2 = l2_opt)
-  search_criteria <- list(strategy = "RandomDiscrete", max_runtime_secs = in_max_run_time_sec)
+                       l2 = l2_opt,
+                       hidden = hidden_layers)
+  search_criteria <- list(strategy = "RandomDiscrete", 
+                          max_runtime_secs = in_max_run_time_sec)
   
   # Train and validate the deep learning grid
   dl_grid <- h2o.grid("deeplearning", x = split_list$x, y = split_list$y,
@@ -397,23 +381,29 @@ get_dl_grid <- function(data, factor_cols, in_max_run_time_sec = 0,
                       training_frame = split_list$train,
                       validation_frame = split_list$valid,
                       seed = 3,
-                      hidden = c(10, 10, 10),
+                      # hidden = c(10, 10),
                       hyper_params = hyper_params,
                       search_criteria = search_criteria,
                       epochs = max_epochs,
                       stopping_rounds = 2,
-                      stopping_metric = "misclassification",
-                      stopping_tolerance = 0.01)
+                      stopping_metric = "AUC",
+                      stopping_tolerance = 0.01,
+                      max_runtime_secs = in_max_runtime_secs,
+                      quiet_mode = FALSE)
   
-  best_model <- get_best_model(split_list, in_grid_id)
+  best_model <- get_best_model(split_list, in_grid_id) 
   
-  return(best_model)
+  return(dl_grid)
 }
 
 h2o.rm("dl_grid")
 
 # build the deep learning model
-dl_model <- get_dl_grid(data, factor_cols)
+eight_hours <- 60 * 60 * 8
+one_hour <- 60 * 60
+dl_grid <- get_dl_grid(data, factor_cols, 
+                       in_max_run_time_sec = one_hour,
+                       max_epochs = 1000)
 ```
 
 

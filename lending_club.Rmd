@@ -120,6 +120,12 @@ write.csv(df, "data/loanstats_2015_large.csv")
 ```
 
 ```{r}
+## H2o model names
+dl_grid_name <- "deep_learning"
+```
+
+
+```{r}
 ## get_split_list
 get_split_list <- function(data, factor_cols, class_col_name = "is_bad"){
   data[,factor_cols] <- as.factor(data[,factor_cols])
@@ -169,13 +175,11 @@ get_test_perf <- function(split_list, model, model_name, print_roc = TRUE){
 
 ```{r}
 ## get_best_model
-get_best_model <- function(grid_id){
+# sort_by_metric: Sort the models in the grid space by a metric. Choices are "logloss", "residual_deviance", 
+#                 "mse", "auc", "accuracy", "precision", "recall", "f1", etc.
+get_best_model <- function(grid, sort_by_metric = "auc"){
   # extract the best model from the grid
-  gridperf <- h2o.getGrid(grid_id = grid_id,
-                          sort_by = "auc",
-                          decreasing = TRUE)
-  
-  best_model <- h2o.getModel(gridperf@model_ids[[1]])
+  best_model <- h2o.getModel(grid@model_ids[[1]])
   
   return(best_model)
 }
@@ -184,9 +188,11 @@ get_best_model <- function(grid_id){
 ```{r}
 #### Random Forest Model
 get_rf_grid <- function(split_list, max_num_models = 25, 
-                        in_grid_id = "rf_grid", 
                         in_balance_classes = FALSE){
+  
+  rf_grid_name <- "random_forest_grid"
 
+  h2o.rm(rf_grid_name)
   
   # define a random forest search grid
   random_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
@@ -201,11 +207,9 @@ get_rf_grid <- function(split_list, max_num_models = 25,
                           hyper_params = rf_hyper_params,
                           search_criteria = random_search_criteria,
                           seed = 3, 
-                          grid_id = in_grid_id)
+                          grid_id = rf_grid_name)
   
-  best_model <- get_best_model(in_grid_id)
-  
-  return(best_model)
+  return(h2o.rf_grid)
 }
 ```
 
@@ -222,10 +226,10 @@ factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state", "grade", 
 data <- as.h2o(df1)
 
 # compute the random forest model
-h2o.rm("rf_grid")
 split_list <- get_split_list(data, factor_cols)
-rf_model <- get_rf_grid(split_list, 4)
-perf <- get_test_perf(data, rf_model, "Random Forest")
+rf_grid <- get_rf_grid(split_list, 4)
+best_model <- get_best_model(rf_grid)
+perf <- get_test_perf(split_list, best_model, "Random Forest")
 
 # predictor importance
 h2o.varimp(best_model)
@@ -239,9 +243,6 @@ h2o.varimp_plot(best_model)
 
 # save the optimized data
 write_csv(df1, "data/loanstats_2015_optimized.csv")
-
-# remove the last grid
-h2o.rm("rf_grid")
 ```
 
 ```{r}
@@ -257,23 +258,24 @@ factor_cols <- c("is_bad", "zip_code", "addr_state", "grade", "sub_grade", "home
 split_list <- get_split_list(data, factor_cols)
 
 # set the number of models to run
-num_models <- 4
+num_models <- 2
 ```
 
 
 ```{r}
 ## Random Forest Model
-h2o.rm("rf_model")
-
-rf_model <- get_rf_grid(split_list, num_models)
+rf_grid <- get_rf_grid(split_list, num_models)
+rf_model <- get_best_model(rf_grid)
 perf_rf <- get_test_perf(split_list, rf_model, "Random Forest")
 ```
 
 ```{r}
 #### GBM Model
 get_gbm_grid <- function(split_list, 
-                         max_num_models = 25, 
-                         in_grid_id = "gbm_grid"){
+                         max_num_models = 25){
+  
+  gbm_grid_name <- "gbm_grid"
+  h2o.rm(gbm_grid_name)
   
   # define random search grid
   random_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
@@ -287,47 +289,40 @@ get_gbm_grid <- function(split_list,
   
   # Train and validate a grid of GBMs
   gbm_grid <- h2o.grid("gbm", x = split_list$x, y = split_list$y,
-                       grid_id = in_grid_id,
+                       grid_id = gbm_grid_name,
                        training_frame = split_list$train,
                        validation_frame = split_list$valid,
                        seed = 3,
                        hyper_params = gbm_hyper_params,
                        search_criteria = random_search_criteria)
   
-  best_model <- get_best_model(in_grid_id)
-  
-  return(best_model)
+  return(gbm_grid)
 }
 
-h2o.rm("gbm_grid")
-
 # build the gbm model
-gbm_model <- get_gbm_grid(split_list,  num_models)
+gbm_grid <- get_gbm_grid(split_list,  num_models)
+gbm_model <- get_best_model(gbm_grid)
 perf_gbm <- get_test_perf(split_list, gbm_model, "GBM")
 ```
 
 
 ```{r}
 #### GLM Model
-get_glm <- function(split_list,
-                    in_model_id = "glm"){
+get_glm <- function(split_list){
+  glm_model_name <- "glm_model"
+  h2o.rm(glm_model_name)
   
   # Train the GLM Model
   glm_fit <- h2o.glm(x = split_list$x, 
                      y = split_list$y, 
                      training_frame = split_list$train,
-                     model_id = in_model_id,
+                     model_id = glm_model_name,
                      validation_frame = split_list$valid,
                      family = "binomial",
                      lambda_search = TRUE)
   
-  glm_perf <- h2o.performance(model = glm_fit,
-                              newdata = split_list$test)
-  
   return(glm_fit)
 }
-
-h2o.rm("glm")
 
 # build the gbm model
 glm_model <- get_glm(split_list)
@@ -336,22 +331,23 @@ perf_glm <- get_test_perf(split_list, glm_model, "GLM")
 
 ```{r}
 #### Naive Bayes Model
-get_nb <- function(split_list, 
-                   in_model_id = "naive_bayes"){
+get_nb <- function(split_list){
+  
+  nb_model_name <- "naive_bayes"
+  
+  h2o.rm(nb_model_name)
   
   # Train the NB model
   nb_fit <- h2o.naiveBayes(x = split_list$x,
                            y = split_list$y,
                            training_frame = split_list$train,
-                           model_id = in_model_id)
+                           model_id = nb_model_name)
   
   nb_perf <- h2o.performance(model = nb_fit,
                              newdata = split_list$test)
   
   return(nb_fit)
 }
-
-h2o.rm("naive_bayes")
 
 # build the naive bayes model
 nb_model <- get_nb(split_list)
@@ -362,7 +358,10 @@ perf_nb <- get_test_perf(split_list, nb_model, "Naive Bayes")
 #### Deep Learning Model
 get_dl_grid <- function(data, factor_cols, in_max_run_time_sec = 0, 
                         max_epochs = 1000000, class_col_name = "is_bad", 
-                        in_grid_id = "dl_grid", in_max_runtime_secs = 0){
+                        in_grid_id = dl_grid_name, in_max_runtime_secs = 0){
+  
+  h2o.rm(in_grid_id)
+  
   data[,factor_cols] <- as.factor(data[,factor_cols])
   
   # split into train, validation, and test sets
@@ -398,12 +397,8 @@ get_dl_grid <- function(data, factor_cols, in_max_run_time_sec = 0,
                       max_runtime_secs = in_max_runtime_secs,
                       quiet_mode = FALSE)
   
-  best_model <- get_best_model(split_list, in_grid_id) 
-  
   return(dl_grid)
 }
-
-h2o.rm("dl_grid")
 
 # build the deep learning model
 eight_hours <- 60 * 60 * 8
@@ -411,6 +406,7 @@ one_hour <- 60 * 60
 dl_grid <- get_dl_grid(data, factor_cols, 
                        in_max_run_time_sec = one_hour,
                        max_epochs = 1000)
+dl_model <- get_best_model(split_list, dl_grid_name)
 ```
 
 

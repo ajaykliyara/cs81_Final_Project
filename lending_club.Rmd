@@ -120,17 +120,17 @@ write.csv(df, "data/loanstats_2015_large.csv")
 ```
 
 ```{r}
-## get_splits
-get_splits <- function(data, factor_cols, class_col_name = "is_bad"){
+## get_split_list
+get_split_list <- function(data, factor_cols, class_col_name = "is_bad"){
   data[,factor_cols] <- as.factor(data[,factor_cols])
   
   # split into train, validation, and test sets
-  splits <- h2o.splitFrame(data = data,
-                           ratios = c(0.7, 0.15),  #partition data into 70%, 15%, 15% chunks
-                           seed = 1)  #setting a seed will guarantee reproducibility
-  train <- splits[[1]]
-  valid <- splits[[2]]
-  test <- splits[[3]]
+  split_list <- h2o.splitFrame(data = data,
+                               ratios = c(0.7, 0.15),  #partition data into 70%, 15%, 15% chunks
+                               seed = 1)  #setting a seed will guarantee reproducibility
+  train <- split_list[[1]]
+  valid <- split_list[[2]]
+  test <- split_list[[3]]
   
   # Create lists which indicate independent and dependent variable names in the data
   y <- class_col_name
@@ -149,8 +149,27 @@ get_splits <- function(data, factor_cols, class_col_name = "is_bad"){
 ```
 
 ```{r}
+## get_test_perf
+get_test_perf <- function(split_list, model, model_name, print_roc = TRUE){
+  # make a prediction using the model and the test data
+  test_perf <- h2o.performance(model = model,
+                               newdata = split_list$test)
+  
+  # if the print flag is set
+  if (print_roc == TRUE){
+    # print AUC and ROC Curve
+    cat(model_name, " AUC: ", h2o.auc(perf))
+    plot(test_perf)    
+  }
+
+  # return an h2o performance object to the caller
+  return(perf)
+}
+```
+
+```{r}
 ## get_best_model
-get_best_model <- function(split_list, grid_id){
+get_best_model <- function(grid_id){
   # extract the best model from the grid
   gridperf <- h2o.getGrid(grid_id = grid_id,
                           sort_by = "auc",
@@ -158,25 +177,16 @@ get_best_model <- function(split_list, grid_id){
   
   best_model <- h2o.getModel(gridperf@model_ids[[1]])
   
-  # make a prediction using the best model and the test data
-  perf <- h2o.performance(model = best_model,
-                          newdata = split_list$test)
-  
-  cat(grid_id, " AUC: ", h2o.auc(perf))
-  
   return(best_model)
 }
 ```
 
 ```{r}
 #### Random Forest Model
-get_rf_grid <- function(data, factor_cols, max_num_models = 25, 
-                        class_col_name = "is_bad", in_grid_id = "rf_grid",
+get_rf_grid <- function(split_list, max_num_models = 25, 
+                        in_grid_id = "rf_grid", 
                         in_balance_classes = FALSE){
-  data[,factor_cols] <- as.factor(data[,factor_cols])
-  
-  # split into train, validation, and test sets
-  split_list <- get_splits(data, factor_cols)
+
   
   # define a random forest search grid
   random_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
@@ -193,7 +203,7 @@ get_rf_grid <- function(data, factor_cols, max_num_models = 25,
                           seed = 3, 
                           grid_id = in_grid_id)
   
-  best_model <- get_best_model(split_list, in_grid_id)
+  best_model <- get_best_model(in_grid_id)
   
   return(best_model)
 }
@@ -213,17 +223,19 @@ data <- as.h2o(df1)
 
 # compute the random forest model
 h2o.rm("rf_grid")
-best_model <- get_rf_grid(data, factor_cols, 4)
+split_list <- get_split_list(data, factor_cols)
+rf_model <- get_rf_grid(split_list, 4)
+perf <- get_test_perf(data, rf_model, "Random Forest")
 
 # predictor importance
 h2o.varimp(best_model)
 h2o.varimp_plot(best_model)
 
 # select the best 16 predictors (home ownership no longer included)
-best_predictors <- h2o.varimp(best_model)$variable
-best_predictors <- best_predictors[1:16]
-best_predictors <- append(best_predictors, c("is_bad"))
-df1 <- select_(df1, .dots = best_predictors)
+#best_predictors <- h2o.varimp(best_model)$variable
+#best_predictors <- best_predictors[1:11]
+#best_predictors <- append(best_predictors, c("is_bad"))
+#df1 <- select_(df1, .dots = best_predictors)
 
 # save the optimized data
 write_csv(df1, "data/loanstats_2015_optimized.csv")
@@ -239,35 +251,39 @@ df1 <- read_csv("data/loanstats_2015_optimized.csv")
 data <- as.h2o(df1)
 
 # re-encode the factors removing home_ownership
-factor_cols <- c("is_bad", "zip_code", "addr_state", "grade", "sub_grade")
+factor_cols <- c("is_bad", "zip_code", "addr_state", "grade", "sub_grade", "home_ownership")
+
+# get the data split list
+split_list <- get_split_list(data, factor_cols)
+
+# set the number of models to run
+num_models <- 4
 ```
 
 
 ```{r}
 ## Random Forest Model
 h2o.rm("rf_model")
-rf_model <- get_rf_grid(data, factor_cols, 25)
-h2o.varimp_plot(rf_model)
+
+rf_model <- get_rf_grid(split_list, num_models)
+perf_rf <- get_test_perf(split_list, rf_model, "Random Forest")
 ```
 
 ```{r}
 #### GBM Model
-get_gbm_grid <- function(data, factor_cols, max_num_models = 25, 
-                         class_col_name = "is_bad", in_grid_id = "gbm_grid"){
-  data[,factor_cols] <- as.factor(data[,factor_cols])
-  
-  # split into train, validation, and test sets
-  split_list <- get_splits(data, factor_cols)
+get_gbm_grid <- function(split_list, 
+                         max_num_models = 25, 
+                         in_grid_id = "gbm_grid"){
   
   # define random search grid
   random_search_criteria <- list(strategy = "RandomDiscrete", max_models = max_num_models)
   
   # GBM hyperparamters
   gbm_hyper_params <- list(learn_rate = c(0.01, 0.1),
-                      max_depth = c(seq(3, 15, 2)),
-                      sample_rate = c(seq(.5, 1, .1)),
-                      col_sample_rate = c(seq(.2, 1, .1)),
-                      ntrees = c(seq(100, 500, 50)))
+                           max_depth = c(seq(3, 15, 2)),
+                           sample_rate = c(seq(.5, 1, .1)),
+                           col_sample_rate = c(seq(.2, 1, .1)),
+                           ntrees = c(seq(100, 500, 50)))
   
   # Train and validate a grid of GBMs
   gbm_grid <- h2o.grid("gbm", x = split_list$x, y = split_list$y,
@@ -278,7 +294,7 @@ get_gbm_grid <- function(data, factor_cols, max_num_models = 25,
                        hyper_params = gbm_hyper_params,
                        search_criteria = random_search_criteria)
   
-  best_model <- get_best_model(split_list, in_grid_id)
+  best_model <- get_best_model(in_grid_id)
   
   return(best_model)
 }
@@ -286,19 +302,15 @@ get_gbm_grid <- function(data, factor_cols, max_num_models = 25,
 h2o.rm("gbm_grid")
 
 # build the gbm model
-gbm_model <- get_gbm_grid(data, factor_cols, 50)
+gbm_model <- get_gbm_grid(split_list,  num_models)
+perf_gbm <- get_test_perf(split_list, gbm_model, "GBM")
 ```
 
 
 ```{r}
 #### GLM Model
-get_glm <- function(data, factor_cols, 
-                    class_col_name = "is_bad", 
+get_glm <- function(split_list,
                     in_model_id = "glm"){
-  data[,factor_cols] <- as.factor(data[,factor_cols])
-  
-  # split into train, validation, and test sets
-  split_list <- get_splits(data, factor_cols)
   
   # Train the GLM Model
   glm_fit <- h2o.glm(x = split_list$x, 
@@ -311,7 +323,6 @@ get_glm <- function(data, factor_cols,
   
   glm_perf <- h2o.performance(model = glm_fit,
                               newdata = split_list$test)
-  cat(in_model_id, " AUC: ", h2o.auc(glm_perf))
   
   return(glm_fit)
 }
@@ -319,18 +330,14 @@ get_glm <- function(data, factor_cols,
 h2o.rm("glm")
 
 # build the gbm model
-glm_model <- get_glm(data, factor_cols)
+glm_model <- get_glm(split_list)
+perf_glm <- get_test_perf(split_list, glm_model, "GLM")
 ```
 
 ```{r}
 #### Naive Bayes Model
-get_nb <- function(data, factor_cols, 
-                   class_col_name = "is_bad", 
+get_nb <- function(split_list, 
                    in_model_id = "naive_bayes"){
-  data[,factor_cols] <- as.factor(data[,factor_cols])
-  
-  # split into train, validation, and test sets
-  split_list <- get_splits(data, factor_cols)
   
   # Train the NB model
   nb_fit <- h2o.naiveBayes(x = split_list$x,
@@ -339,8 +346,7 @@ get_nb <- function(data, factor_cols,
                            model_id = in_model_id)
   
   nb_perf <- h2o.performance(model = nb_fit,
-                              newdata = split_list$test)
-  cat(in_model_id, " AUC: ", h2o.auc(nb_perf))
+                             newdata = split_list$test)
   
   return(nb_fit)
 }
@@ -348,7 +354,8 @@ get_nb <- function(data, factor_cols,
 h2o.rm("naive_bayes")
 
 # build the naive bayes model
-nb_model <- get_nb(data, factor_cols)
+nb_model <- get_nb(split_list)
+perf_nb <- get_test_perf(split_list, nb_model, "Naive Bayes")
 ```
 
 ```{r}
@@ -359,7 +366,7 @@ get_dl_grid <- function(data, factor_cols, in_max_run_time_sec = 0,
   data[,factor_cols] <- as.factor(data[,factor_cols])
   
   # split into train, validation, and test sets
-  split_list <- get_splits(data, factor_cols)
+  split_list <- get_split_list(data, factor_cols)
   
   # Deeplearning hyperparamters
   activation_opt <- c("Rectifier", "Tanh", "TanhWithDropout", "RectifierWithDropout", 
@@ -409,7 +416,7 @@ dl_grid <- get_dl_grid(data, factor_cols,
 
 ```{r}
 # split into train, validation, and test sets
-split_list <- get_splits(data, factor_cols)
+split_list <- get_split_list(data, factor_cols)
 
 ### ensemble stacking
 learner <- c("h2o.glm.wrapper", "h2o.randomForest.wrapper", 

@@ -37,7 +37,7 @@ h2o.init(nthreads = -1, #Number of threads -1 means use all cores on your machin
 
 
 ```{r}
-### Large data frame for feature selection
+### Large data frame for loan origination feature selection
 # read the csv data file
 df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE,
                 stringsAsFactors = F)
@@ -47,11 +47,19 @@ orig_col<- c("loan_amnt", "purpose", "grade", "sub_grade", "int_rate", "term", "
              "fico_range_high", "earliest_cr_line", "open_acc", "total_acc", "revol_bal", "revol_util",
              "inq_last_6mths", "acc_now_delinq", "delinq_amnt", "delinq_2yrs", "mths_since_last_delinq", 
              "pub_rec", "mths_since_last_record",  "mths_since_last_major_derog", "collections_12_mths_ex_med",
-             "loan_status", "desc", "last_fico_range_high", "last_fico_range_low")
+             "loan_status", "desc")
+note_trading_col <- c("last_fico_range_high", "last_fico_range_low", "issue_d", "last_pymnt_d",
+                      "last_pymnt_amnt", "last_credit_pull_d", "total_pymnt", "total_rec_prncp", 
+                      "total_rec_int", "total_rec_late_fee")
+note_trading_col <- c("last_fico_range_high", "last_fico_range_low",
+                      "last_pymnt_amnt", "last_credit_pull_d", "total_pymnt", "total_rec_prncp", 
+                      "total_rec_int", "total_rec_late_fee")
+combined <- c(orig_col, note_trading_col)
+#df <- df %>% select(one_of(combined))
 df <- df %>% select(one_of(orig_col))
 
 # columns to delete
-col_to_delete <- c("purpose", "title", "collections_12_mths_ex_med", "mths_since_last_major_derog")
+col_to_delete <- c("title", "collections_12_mths_ex_med", "mths_since_last_major_derog")
 df <- df %>% select(-one_of(col_to_delete))
 
 # clean up emp_length column
@@ -119,11 +127,6 @@ df$earliest_cr_line <- as.numeric(as.Date(as.yearmon(df$earliest_cr_line, "%b-%y
 write.csv(df, "data/loanstats_2015_large.csv")
 ```
 
-```{r}
-## H2o model names
-dl_grid_name <- "deep_learning"
-```
-
 
 ```{r}
 ## get_split_list
@@ -188,7 +191,8 @@ get_best_model <- function(grid, sort_by_metric = "auc"){
 ```{r}
 #### Random Forest Model
 get_rf_grid <- function(split_list, max_num_models = 25, 
-                        in_balance_classes = FALSE){
+                        in_balance_classes = FALSE,
+                        nfolds = 5){
   
   rf_grid_name <- "random_forest_grid"
 
@@ -207,7 +211,10 @@ get_rf_grid <- function(split_list, max_num_models = 25,
                           hyper_params = rf_hyper_params,
                           search_criteria = random_search_criteria,
                           seed = 3, 
-                          grid_id = rf_grid_name[1])
+                          grid_id = rf_grid_name[1],
+                          nfolds = nfolds,
+                          fold_assignment = "Modulo",
+                          keep_cross_validation_predictions = TRUE)
   
   return(h2o.rf_grid)
 }
@@ -220,7 +227,7 @@ df1 <- read_csv("data/loanstats_2015_large.csv")
 df1 <- df1 %>% select(-X1)
 
 # encode the factors as factors
-factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state", "grade", "sub_grade")
+factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state", "grade", "sub_grade", "purpose")
 
 # create an h2o data frame
 data <- as.h2o(df1)
@@ -252,27 +259,24 @@ df1 <- read_csv("data/loanstats_2015_optimized.csv")
 data <- as.h2o(df1)
 
 # re-encode the factors removing home_ownership
-factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state", "grade", "sub_grade")
+factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state", "grade", "sub_grade", "purpose")
 
 # get the data split list
 split_list <- get_split_list(data, factor_cols)
 
-# set the number of models to run
-num_models <- 2
-```
+# set the global number of models and folds to run
+num_models <- 25
+nfolds <- 10
 
-
-```{r}
-## Random Forest Model
-rf_grid <- get_rf_grid(split_list, num_models)
-rf_model <- get_best_model(rf_grid)
-perf_rf <- get_test_perf(split_list, rf_model, "Random Forest")
+# create an empty AUC list to store the AUC results
+auc_list <- list()
 ```
 
 ```{r}
 #### GBM Model
 get_gbm_grid <- function(split_list, 
-                         max_num_models = 25){
+                         max_num_models = 25,
+                         nfolds = 5){
   
   gbm_grid_name <- "gbm_grid"
   h2o.rm(gbm_grid_name[1])
@@ -294,22 +298,20 @@ get_gbm_grid <- function(split_list,
                        validation_frame = split_list$valid,
                        seed = 3,
                        hyper_params = gbm_hyper_params,
-                       search_criteria = random_search_criteria)
+                       search_criteria = random_search_criteria,
+                       nfolds = nfolds,
+                       fold_assignment = "Modulo",
+                       keep_cross_validation_predictions = TRUE)
   
   return(gbm_grid)
 }
-
-# build the gbm model
-gbm_grid <- get_gbm_grid(split_list,  num_models)
-gbm_model <- get_best_model(gbm_grid)
-perf_gbm <- get_test_perf(split_list, gbm_model, "GBM")
 ```
 
 
 ```{r}
 #### GLM Model
-get_glm <- function(split_list){
-  glm_model_name <- "glm_model"
+get_glm <- function(split_list, nfolds = 5){
+  glm_model_name <- "glm_model_3"
   h2o.rm(glm_model_name[1])
   
   # Train the GLM Model
@@ -319,19 +321,18 @@ get_glm <- function(split_list){
                      model_id = glm_model_name[1],
                      validation_frame = split_list$valid,
                      family = "binomial",
-                     lambda_search = TRUE)
+                     #lambda_search = TRUE,
+                     nfolds = nfolds,
+                     fold_assignment = "Modulo",
+                     keep_cross_validation_predictions = TRUE)
   
   return(glm_fit)
 }
-
-# build the gbm model
-glm_model <- get_glm(split_list)
-perf_glm <- get_test_perf(split_list, glm_model, "GLM")
 ```
 
 ```{r}
 #### Naive Bayes Model
-get_nb <- function(split_list){
+get_nb <- function(split_list, nfolds = 5){
   
   nb_model_name <- "naive_bayes"
   
@@ -341,21 +342,21 @@ get_nb <- function(split_list){
   nb_fit <- h2o.naiveBayes(x = split_list$x,
                            y = split_list$y,
                            training_frame = split_list$train,
-                           model_id = nb_model_name[1])
+                           model_id = nb_model_name[1],
+                           nfolds = nfolds,
+                           fold_assignment = "Modulo",
+                           keep_cross_validation_predictions = TRUE)
   
   nb_perf <- h2o.performance(model = nb_fit,
                              newdata = split_list$test)
   
   return(nb_fit)
 }
-
-# build the naive bayes model
-nb_model <- get_nb(split_list)
-perf_nb <- get_test_perf(split_list, nb_model, "Naive Bayes")
 ```
 
 ```{r}
 #### Deep Learning Model
+dl_grid_name <- "deep_learning"
 get_dl_grid <- function(data, factor_cols, in_max_run_time_sec = 0, 
                         max_epochs = 1000000, class_col_name = "is_bad", 
                         in_grid_id = dl_grid_name, in_max_runtime_secs = 0){
@@ -409,33 +410,44 @@ dl_grid <- get_dl_grid(data, factor_cols,
 dl_model <- get_best_model(split_list, dl_grid_name)
 ```
 
+```{r}
+#### build the models
+# Random Forest Model
+rf_grid <- get_rf_grid(split_list, num_models, nfolds)
+rf_model <- get_best_model(rf_grid)
+perf_rf <- get_test_perf(split_list, rf_model, "Random Forest")
+auc_list$random_forest <- h2o.auc(perf_rf)
+
+# build the gbm model
+gbm_grid <- get_gbm_grid(split_list,  num_models, nfolds)
+gbm_model <- get_best_model(gbm_grid)
+perf_gbm <- get_test_perf(split_list, gbm_model, "GBM")
+auc_list$gbm <- h2o.auc(perf_gbm)
+
+# build the glm model
+glm_model <- get_glm(split_list, nfolds)
+perf_glm <- get_test_perf(split_list, glm_model, "GLM")
+auc_list$glm <- h2o.auc(perf_glm)
+
+# build the naive bayes model
+nb_model <- get_nb(split_list, nfolds)
+perf_nb <- get_test_perf(split_list, nb_model, "Naive Bayes")
+auc_list$nb <- h2o.auc(perf_nb)
+```
+
 
 ```{r}
-# split into train, validation, and test sets
-split_list <- get_split_list(data, factor_cols)
-
 ### ensemble stacking
-learner <- c("h2o.glm.wrapper", "h2o.randomForest.wrapper", 
-             "h2o.gbm.wrapper", "h2o.deeplearning.wrapper")
+h2o.getModel(grid@model_ids[[1]])
+models <- list(glm_model, h2o.getModel(rf_grid@model_ids[[1]]), h2o.getModel(rf_grid@model_ids[[2]]), 
+               h2o.getModel(gbm_grid@model_ids[[1]]), h2o.getModel(gbm_grid@model_ids[[2]]))
 metalearner <- "h2o.glm.wrapper"
-
-#### Train an Ensemble
-#Train the ensemble (using 5-fold internal CV) to generate the level-one data.  Note that more CV folds will take longer to train, but should increase performance.
-fit <- h2o.ensemble(x = split_list$x, y = split_list$y, 
-                    training_frame = split_list$train, 
-                    family = "binomial", 
-                    learner = learner, 
-                    metalearner = metalearner,
-                    cvControl = list(V = 5))
-
-#### Predict 
-#Generate predictions on the test set.
-pred <- predict(fit, split_list$test)
-predictions <- as.data.frame(pred$pred)[,3]  #third column is P(Y==1)
-labels <- as.data.frame(split_list$test[,split_list$y])[,1]
-
-# AUC
-cvAUC::AUC(predictions = predictions, labels = labels)
+stack <- h2o.stack(models = models,
+                   response_frame = split_list$train[,split_list$y],
+                   metalearner = metalearner,
+                   seed = 3)
+perf <- h2o.ensemble_performance(stack, newdata = split_list$test)
+print(perf)
 ```
 
 

@@ -35,99 +35,6 @@ h2o.init(nthreads = -1, #Number of threads -1 means use all cores on your machin
          max_mem_size = "16G")  #max mem size is the maximum memory to allocate to H2O
 ```
 
-
-```{r}
-### Large data frame for loan origination feature selection
-# read the csv data file
-df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE,
-                stringsAsFactors = F)
-
-orig_col<- c("loan_amnt", "purpose", "grade", "sub_grade", "int_rate", "term", "installment", "home_ownership",
-             "title", "emp_length", "annual_inc", "dti", "zip_code", "addr_state", "fico_range_low", 
-             "fico_range_high", "earliest_cr_line", "open_acc", "total_acc", "revol_bal", "revol_util",
-             "inq_last_6mths", "acc_now_delinq", "delinq_amnt", "delinq_2yrs", "mths_since_last_delinq", 
-             "pub_rec", "mths_since_last_record",  "mths_since_last_major_derog", "collections_12_mths_ex_med",
-             "loan_status", "desc")
-note_trading_col <- c("last_fico_range_high", "last_fico_range_low", "issue_d", "last_pymnt_d",
-                      "last_pymnt_amnt", "last_credit_pull_d", "total_pymnt", "total_rec_prncp", 
-                      "total_rec_int", "total_rec_late_fee")
-note_trading_col <- c("last_fico_range_high", "last_fico_range_low",
-                      "last_pymnt_amnt", "last_credit_pull_d", "total_pymnt", "total_rec_prncp", 
-                      "total_rec_int", "total_rec_late_fee")
-combined <- c(orig_col, note_trading_col)
-#df <- df %>% select(one_of(combined))
-df <- df %>% select(one_of(orig_col))
-
-# columns to delete
-col_to_delete <- c("title", "collections_12_mths_ex_med", "mths_since_last_major_derog")
-df <- df %>% select(-one_of(col_to_delete))
-
-# clean up emp_length column
-df$emp_length <- str_match(df$emp_length, "[0123456789+]")
-df$emp_length <- as.numeric(df$emp_length)
-
-# remove '%' from revol_util and int_rate
-df$revol_util <- gsub("%", "", df$revol_util)
-df$revol_util <- as.numeric(df$revol_util)
-df$int_rate <- gsub("%", "", df$int_rate)
-df$int_rate <- as.numeric(df$int_rate)
-
-# clean up NA's
-# what columns have na values??
-na_col_list <- list()
-i <- 1
-for (col in names(df)){
-  num_na <- sum(is.na(df[, col]))
-  if (num_na > 0){
-    cat(col, ": ", num_na, "\n")
-    na_col_list[i] <- col
-    i <- i + 1
-  }
-}
-
-# mths_since_last_delinq, emp_length
-df <- df %>%
-  mutate(mths_since_last_delinq = ifelse(is.na(mths_since_last_delinq), 0, mths_since_last_delinq)) %>%
-  mutate(emp_length = ifelse(is.na(emp_length), 0, emp_length)) %>%
-  mutate(open_acc = ifelse(is.na(open_acc), 0, open_acc)) %>%
-  mutate(mths_since_last_record = ifelse(is.na(mths_since_last_record), 0, mths_since_last_record))
-
-# Remove all remaining rows with NA's
-df <- na.omit(df)
-
-# remove columns which are all zeros
-all_zeros <- sapply(df, function(x) {
-  col_sum = 1
-  if (is.numeric(x)){
-      col_sum = sum(x)
-  }
-  col_sum == 0
-})
-df <- df[,all_zeros==FALSE]
-
-# remove "months" from the term column
-df$term <- str_match(df$term, "[0123456789+]")
-df$term <- as.numeric(df$term)
-
-# add description sentiment column
-df <- df %>%
-  mutate(sentiment = as.numeric(get_sentiment(desc))) %>%
-  select(-one_of("desc"))
-
-# create a good / bad column
-# bad if late more than 30 days, in default, or charged off
-bad_indicators <- c("Default", "Charged Off", "Late (31-120 days)", "Does not meet the credit policy. Status:Charged Off")
-df <- df %>%
-  mutate(is_bad = ifelse(df$loan_status %in% bad_indicators, 1, 0)) %>%
-  select(-loan_status)
-
-# convert earliest credit line dates to time since epoch
-df$earliest_cr_line <- as.numeric(as.Date(as.yearmon(df$earliest_cr_line, "%b-%y")))
-
-write.csv(df, "data/loanstats_2015_large.csv")
-```
-
-
 ```{r}
 ## get_split_list
 get_split_list <- function(data, factor_cols, class_col_name = "is_bad"){
@@ -189,10 +96,21 @@ get_best_model <- function(grid, sort_by_metric = "auc"){
 ```
 
 ```{r}
+## Get H2o Model List
+get_h2o_model_list <- function(grid){
+  model_ids <- grid@model_ids
+  models <- lapply(model_ids, function(id) { h2o.getModel(id)})
+  return(models)
+}
+```
+
+
+```{r}
 #### Random Forest Model
-get_rf_grid <- function(split_list, max_num_models = 25, 
-                        in_balance_classes = FALSE,
-                        nfolds = 5){
+get_rf_grid <- function(split_list, 
+                        max_num_models = 25, 
+                        nfolds = 5,
+                        in_balance_classes = FALSE){
   
   rf_grid_name <- "random_forest_grid"
 
@@ -221,63 +139,10 @@ get_rf_grid <- function(split_list, max_num_models = 25,
 ```
 
 ```{r}
-## Feature Selection with H2o
-# read the data set
-df1 <- read_csv("data/loanstats_2015_large.csv")
-df1 <- df1 %>% select(-X1)
-
-# encode the factors as factors
-factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state", "grade", "sub_grade", "purpose")
-
-# create an h2o data frame
-data <- as.h2o(df1)
-
-# compute the random forest model
-split_list <- get_split_list(data, factor_cols)
-rf_grid <- get_rf_grid(split_list, 2)
-best_model <- get_best_model(rf_grid)
-perf <- get_test_perf(split_list, best_model, "Random Forest")
-
-# predictor importance
-h2o.varimp(best_model)
-h2o.varimp_plot(best_model)
-
-# select the best 27 predictors
-best_predictors <- h2o.varimp(best_model)$variable
-best_predictors <- best_predictors[1:27]
-best_predictors <- append(best_predictors, c("is_bad"))
-df1 <- select_(df1, .dots = best_predictors)
-
-# save the optimized data
-write_csv(df1, "data/loanstats_2015_optimized.csv")
-```
-
-```{r}
-## Read in the optimized data set
-# save the optimized data
-df1 <- read_csv("data/loanstats_2015_optimized.csv")
-data <- as.h2o(df1)
-
-# re-encode the factors removing home_ownership
-factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state", "grade", "sub_grade", "purpose")
-
-# get the data split list
-split_list <- get_split_list(data, factor_cols)
-
-# set the global number of models and folds to run
-num_models <- 25
-nfolds <- 10
-
-# create an empty AUC list to store the AUC results
-auc_list <- list()
-```
-
-```{r}
 #### GBM Model
 get_gbm_grid <- function(split_list, 
                          max_num_models = 25,
                          nfolds = 5){
-  
   gbm_grid_name <- "gbm_grid"
   h2o.rm(gbm_grid_name[1])
   
@@ -407,12 +272,56 @@ one_hour <- 60 * 60
 dl_grid <- get_dl_grid(data, factor_cols, 
                        in_max_run_time_sec = one_hour,
                        max_epochs = 1000)
-dl_model <- get_best_model(split_list, dl_grid_name)
+# dl_model <- get_best_model(split_list, dl_grid_name)
+```
+
+```{r}
+### Load the training data
+load_training_data <- function(file_name, factor_cols){
+  ## Read the data from the file name
+  df <- read_csv(file_name)
+  data <- as.h2o(df)
+
+  # get the data split list
+  split_list <- get_split_list(data, factor_cols)
+  
+  # return the data to the caller
+  ret_val = list()
+  ret_val$df <- df
+  ret_val$split_list <- split_list
+  return(ret_val)
+}
+```
+
+```{r}
+### ensemble stacking
+get_h2o_ensemble <- function(model_list){
+  metalearner <- "h2o.glm.wrapper"
+  stack <- h2o.stack(models = model_list,
+                     response_frame = split_list$train[,split_list$y],
+                     metalearner = metalearner,
+                     seed = 3)
+  perf <- h2o.ensemble_performance(stack, newdata = split_list$test)
+  return(perf)
+}
 ```
 
 ```{r}
 #### build the models
-# Random Forest Model
+# first run the loan origination model
+orig_file_name <- "data/loanstats_2015_optimized.csv"
+orig_factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state", "grade", "sub_grade", "purpose")
+orig_data_list <- load_training_data(orig_file_name, orig_factor_cols)
+split_list <- orig_data_list$split_list
+
+# set the global number of models and folds to run
+num_models <- 2
+nfolds <- 2
+
+# create an empty AUC list to store the AUC results
+auc_list <- list()
+
+# build the Random Forest Model
 rf_grid <- get_rf_grid(split_list, num_models, nfolds)
 rf_model <- get_best_model(rf_grid)
 perf_rf <- get_test_perf(split_list, rf_model, "Random Forest")
@@ -433,28 +342,136 @@ auc_list$glm <- h2o.auc(perf_glm)
 nb_model <- get_nb(split_list, nfolds)
 perf_nb <- get_test_perf(split_list, nb_model, "Naive Bayes")
 auc_list$nb <- h2o.auc(perf_nb)
-```
 
+# ensemble stacking 
+rf_models <- get_h2o_model_list(rf_grid)
+gbm_models <- get_h2o_model_list(gbm_grid)
+model_list <- c(rf_models, gbm_models, glm_model, nb_model)
+
+ensemble_perf <- get_h2o_ensemble(model_list)
+print(ensemble_perf)
+```
 
 ```{r}
-### ensemble stacking
-h2o.getModel(grid@model_ids[[1]])
-models <- list(glm_model, h2o.getModel(rf_grid@model_ids[[1]]), h2o.getModel(rf_grid@model_ids[[2]]), 
-               h2o.getModel(gbm_grid@model_ids[[1]]), h2o.getModel(gbm_grid@model_ids[[2]]))
-metalearner <- "h2o.glm.wrapper"
-stack <- h2o.stack(models = models,
-                   response_frame = split_list$train[,split_list$y],
-                   metalearner = metalearner,
-                   seed = 3)
-perf <- h2o.ensemble_performance(stack, newdata = split_list$test)
-print(perf)
+### Large data frame for loan origination feature selection
+# read the csv data file
+df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE,
+                stringsAsFactors = F)
+
+orig_col<- c("loan_amnt", "purpose", "grade", "sub_grade", "int_rate", "term", "installment", "home_ownership",
+             "title", "emp_length", "annual_inc", "dti", "zip_code", "addr_state", "fico_range_low", 
+             "fico_range_high", "earliest_cr_line", "open_acc", "total_acc", "revol_bal", "revol_util",
+             "inq_last_6mths", "acc_now_delinq", "delinq_amnt", "delinq_2yrs", "mths_since_last_delinq", 
+             "pub_rec", "mths_since_last_record",  "mths_since_last_major_derog", "collections_12_mths_ex_med",
+             "loan_status", "desc")
+note_trading_col <- c("last_fico_range_high", "last_fico_range_low", "issue_d", "last_pymnt_d",
+                      "last_pymnt_amnt", "last_credit_pull_d", "total_pymnt", "total_rec_prncp", 
+                      "total_rec_int", "total_rec_late_fee")
+
+combined <- c(orig_col, note_trading_col)
+#df <- df %>% select(one_of(combined))
+df <- df %>% select(one_of(orig_col))
+
+# columns to delete
+col_to_delete <- c("title", "collections_12_mths_ex_med", "mths_since_last_major_derog")
+df <- df %>% select(-one_of(col_to_delete))
+
+# clean up emp_length column
+df$emp_length <- str_match(df$emp_length, "[0123456789+]")
+df$emp_length <- as.numeric(df$emp_length)
+
+# remove '%' from revol_util and int_rate
+df$revol_util <- gsub("%", "", df$revol_util)
+df$revol_util <- as.numeric(df$revol_util)
+df$int_rate <- gsub("%", "", df$int_rate)
+df$int_rate <- as.numeric(df$int_rate)
+
+# clean up NA's
+# what columns have na values??
+na_col_list <- list()
+i <- 1
+for (col in names(df)){
+  num_na <- sum(is.na(df[, col]))
+  if (num_na > 0){
+    cat(col, ": ", num_na, "\n")
+    na_col_list[i] <- col
+    i <- i + 1
+  }
+}
+
+# mths_since_last_delinq, emp_length
+df <- df %>%
+  mutate(mths_since_last_delinq = ifelse(is.na(mths_since_last_delinq), 0, mths_since_last_delinq)) %>%
+  mutate(emp_length = ifelse(is.na(emp_length), 0, emp_length)) %>%
+  mutate(open_acc = ifelse(is.na(open_acc), 0, open_acc)) %>%
+  mutate(mths_since_last_record = ifelse(is.na(mths_since_last_record), 0, mths_since_last_record))
+
+# Remove all remaining rows with NA's
+df <- na.omit(df)
+
+# remove columns which are all zeros
+all_zeros <- sapply(df, function(x) {
+  col_sum = 1
+  if (is.numeric(x)){
+      col_sum = sum(x)
+  }
+  col_sum == 0
+})
+df <- df[,all_zeros==FALSE]
+
+# remove "months" from the term column
+df$term <- str_match(df$term, "[0123456789+]")
+df$term <- as.numeric(df$term)
+
+# add description sentiment column
+df <- df %>%
+  mutate(sentiment = as.numeric(get_sentiment(desc))) %>%
+  select(-one_of("desc"))
+
+# create a good / bad column
+# bad if late more than 30 days, in default, or charged off
+bad_indicators <- c("Default", "Charged Off", "Late (31-120 days)", "Does not meet the credit policy. Status:Charged Off")
+df <- df %>%
+  mutate(is_bad = ifelse(df$loan_status %in% bad_indicators, 1, 0)) %>%
+  select(-loan_status)
+
+# convert earliest credit line dates to time since epoch
+df$earliest_cr_line <- as.numeric(as.Date(as.yearmon(df$earliest_cr_line, "%b-%y")))
+
+write.csv(df, "data/loanstats_2015_large.csv")
 ```
 
+```{r}
+## Feature Selection with H2o
+# read the data set
+df1 <- read_csv("data/loanstats_2015_large.csv")
+df1 <- df1 %>% select(-X1)
 
+# encode the factors as factors
+factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state", "grade", "sub_grade", "purpose")
 
+# create an h2o data frame
+data <- as.h2o(df1)
 
+# compute the random forest model
+split_list <- get_split_list(data, factor_cols)
+rf_grid <- get_rf_grid(split_list, 2)
+best_model <- get_best_model(rf_grid)
+perf <- get_test_perf(split_list, best_model, "Random Forest")
 
+# predictor importance
+h2o.varimp(best_model)
+h2o.varimp_plot(best_model)
 
+# select the best 27 predictors
+best_predictors <- h2o.varimp(best_model)$variable
+best_predictors <- best_predictors[1:27]
+best_predictors <- append(best_predictors, c("is_bad"))
+df1 <- select_(df1, .dots = best_predictors)
+
+# save the optimized data
+write_csv(df1, "data/loanstats_2015_optimized.csv")
+```
 
 
 

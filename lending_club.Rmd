@@ -189,7 +189,8 @@ get_glm <- function(split_list, nfolds = 5){
                      #lambda_search = TRUE,
                      nfolds = nfolds,
                      fold_assignment = "Modulo",
-                     keep_cross_validation_predictions = TRUE)
+                     keep_cross_validation_predictions = TRUE,
+                     remove_collinear_columns = TRUE)
   
   return(glm_fit)
 }
@@ -209,8 +210,7 @@ get_nb <- function(split_list, nfolds = 5){
                            training_frame = split_list$train,
                            model_id = nb_model_name[1],
                            nfolds = nfolds,
-                           fold_assignment = "Modulo",
-                           keep_cross_validation_predictions = TRUE)
+                           fold_assignment = "Modulo")
   
   nb_perf <- h2o.performance(model = nb_fit,
                              newdata = split_list$test)
@@ -307,16 +307,15 @@ get_h2o_ensemble <- function(model_list){
 ```
 
 ```{r}
-#### build the models
-# first run the loan origination model
+#### build the Loan Origination models
 orig_file_name <- "data/loanstats_2015_optimized.csv"
-orig_factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state", "grade", "sub_grade", "purpose")
+orig_factor_cols <- c("is_bad", "zip_code", "addr_state", "grade", "sub_grade", "purpose", "home_ownership")
 orig_data_list <- load_training_data(orig_file_name, orig_factor_cols)
 split_list <- orig_data_list$split_list
 
 # set the global number of models and folds to run
-num_models <- 2
-nfolds <- 2
+num_models <- 25
+nfolds <- 5
 
 # create an empty AUC list to store the AUC results
 auc_list <- list()
@@ -353,7 +352,43 @@ print(ensemble_perf)
 ```
 
 ```{r}
+#### build the loan marketplace models
+marketplace_file_name <- "data/loanstats_2015_marketplace_optimized.csv"
+market_factor_cols <- c("is_bad", "zip_code")
+market_data_list <- load_training_data(marketplace_file_name, market_factor_cols)
+split_list <- market_data_list$split_list
+
+# set the global number of models and folds to run
+num_models <- 2
+nfolds <- 2
+
+# build the Random Forest Model
+mp_rf_grid <- get_rf_grid(split_list, num_models, nfolds)
+mp_rf_model <- get_best_model(mp_rf_grid)
+mp_perf_rf <- get_test_perf(split_list, mp_rf_model, "Random Forest")
+auc_list$random_forest <- h2o.auc(mp_perf_rf)
+
+# build the glm model
+mp_glm_model <- get_glm(split_list, nfolds)
+mp_perf_glm <- get_test_perf(split_list, mp_glm_model, "GLM")
+auc_list$mp_glm <- h2o.auc(mp_perf_glm)
+
+# build the gbm model
+mp_gbm_grid <- get_gbm_grid(split_list,  num_models, nfolds)
+mp_gbm_model <- get_best_model(mp_gbm_grid)
+mp_perf_gbm <- get_test_perf(split_list, mp_gbm_model, "GBM")
+auc_list$mp_gbm <- h2o.auc(mp_perf_gbm)
+```
+
+```{r eval = FALSE, echo = FALSE}
+############################################################################
+################################ Data Wrangling ############################
+############################################################################
 ### Large data frame for loan origination feature selection
+# set to TRUE for loan marketplace data wrangling
+# set to FALSE for loan origination data wrangling
+loan_marketplace <- TRUE
+
 # read the csv data file
 df <- read.csv("data/LoanStats3a_securev1.csv", header = TRUE,
                 stringsAsFactors = F)
@@ -362,19 +397,27 @@ orig_col<- c("loan_amnt", "purpose", "grade", "sub_grade", "int_rate", "term", "
              "title", "emp_length", "annual_inc", "dti", "zip_code", "addr_state", "fico_range_low", 
              "fico_range_high", "earliest_cr_line", "open_acc", "total_acc", "revol_bal", "revol_util",
              "inq_last_6mths", "acc_now_delinq", "delinq_amnt", "delinq_2yrs", "mths_since_last_delinq", 
-             "pub_rec", "mths_since_last_record",  "mths_since_last_major_derog", "collections_12_mths_ex_med",
+             "pub_rec", "mths_since_last_record",
              "loan_status", "desc")
-note_trading_col <- c("last_fico_range_high", "last_fico_range_low", "issue_d", "last_pymnt_d",
-                      "last_pymnt_amnt", "last_credit_pull_d", "total_pymnt", "total_rec_prncp", 
-                      "total_rec_int", "total_rec_late_fee")
 
-combined <- c(orig_col, note_trading_col)
-#df <- df %>% select(one_of(combined))
-df <- df %>% select(one_of(orig_col))
-
-# columns to delete
-col_to_delete <- c("title", "collections_12_mths_ex_med", "mths_since_last_major_derog")
-df <- df %>% select(-one_of(col_to_delete))
+# if the flag is set to do loan marketplace data wrangling
+if (loan_marketplace == TRUE){
+  # create a list of additional data to add to the 
+  note_trading_col <- c("last_fico_range_high", "last_fico_range_low", "issue_d", "last_pymnt_d",
+                        "last_pymnt_amnt", "last_credit_pull_d", "total_pymnt", "total_rec_prncp", 
+                        "total_rec_int", "total_rec_late_fee") 
+  combined_col <- c(orig_col, note_trading_col)
+  df <- df %>% select(one_of(combined_col))
+  
+  # calculate last payment data - issue data
+  df$issue_d <- as.Date(as.yearmon(df$issue_d, "%b-%y"))
+  df$last_pymnt_d <- as.Date(as.yearmon(df$last_pymnt_d, "%b-%y"))
+  df <- df %>% 
+    mutate(last_pymnt_delta = as.numeric(last_pymnt_d - issue_d)) %>%
+    select(-one_of(c("issue_d", "last_pymnt_d")))
+}else{
+  df <- df %>% select(one_of(orig_col))
+}
 
 # clean up emp_length column
 df$emp_length <- str_match(df$emp_length, "[0123456789+]")
@@ -438,39 +481,44 @@ df <- df %>%
 # convert earliest credit line dates to time since epoch
 df$earliest_cr_line <- as.numeric(as.Date(as.yearmon(df$earliest_cr_line, "%b-%y")))
 
-write.csv(df, "data/loanstats_2015_large.csv")
-```
-
-```{r}
+######################################################################################
 ## Feature Selection with H2o
-# read the data set
-df1 <- read_csv("data/loanstats_2015_large.csv")
-df1 <- df1 %>% select(-X1)
 
 # encode the factors as factors
 factor_cols <- c("is_bad", "home_ownership", "zip_code", "addr_state", "grade", "sub_grade", "purpose")
 
 # create an h2o data frame
-data <- as.h2o(df1)
+data <- as.h2o(df)
 
 # compute the random forest model
 split_list <- get_split_list(data, factor_cols)
-rf_grid <- get_rf_grid(split_list, 2)
+rf_grid <- get_rf_grid(split_list, 2, 2)
 best_model <- get_best_model(rf_grid)
 perf <- get_test_perf(split_list, best_model, "Random Forest")
 
 # predictor importance
 h2o.varimp(best_model)
-h2o.varimp_plot(best_model)
-
-# select the best 27 predictors
+h2o.varimp_plot(best_model, num_of_features = 20)
 best_predictors <- h2o.varimp(best_model)$variable
-best_predictors <- best_predictors[1:27]
-best_predictors <- append(best_predictors, c("is_bad"))
-df1 <- select_(df1, .dots = best_predictors)
 
-# save the optimized data
-write_csv(df1, "data/loanstats_2015_optimized.csv")
+if (loan_marketplace == TRUE){
+  # select the best 6 predictors for use in the prediction models
+  best_predictors <- best_predictors[1:6]
+}else{
+  # select the best 27 predictors
+  best_predictors <- best_predictors[1:27]
+}
+
+best_predictors <- append(best_predictors, c("is_bad"))
+df <- select_(df, .dots = best_predictors) 
+
+if (loan_marketplace == TRUE){  
+  # save the optimized data
+  write_csv(df, "data/loanstats_2015_marketplace_optimized.csv")  
+}else{
+  # save the optimized data
+  write_csv(df, "data/loanstats_2015_optimized.csv")
+}
 ```
 
 

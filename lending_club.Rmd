@@ -210,16 +210,14 @@ get_nb <- function(split_list, nfolds = 5){
                            training_frame = split_list$train,
                            model_id = nb_model_name[1],
                            nfolds = nfolds,
-                           fold_assignment = "Modulo")
-  
-  nb_perf <- h2o.performance(model = nb_fit,
-                             newdata = split_list$test)
+                           fold_assignment = "Modulo",
+                           keep_cross_validation_predictions = TRUE)
   
   return(nb_fit)
 }
 ```
 
-```{r}
+```{r eval = FALSE, echo = FALSE}
 #### Deep Learning Model
 dl_grid_name <- "deep_learning"
 get_dl_grid <- function(data, factor_cols, in_max_run_time_sec = 0, 
@@ -295,7 +293,7 @@ load_training_data <- function(file_name, factor_cols){
 
 ```{r}
 ### ensemble stacking
-get_h2o_ensemble <- function(model_list){
+get_h2o_ensemble <- function(split_list, model_list){
   metalearner <- "h2o.glm.wrapper"
   stack <- h2o.stack(models = model_list,
                      response_frame = split_list$train[,split_list$y],
@@ -307,15 +305,17 @@ get_h2o_ensemble <- function(model_list){
 ```
 
 ```{r}
+# set the global number of models and folds to run
+num_models <- 5
+nfolds <- 5
+```
+
+```{r}
 #### build the Loan Origination models
 orig_file_name <- "data/loanstats_2015_optimized.csv"
 orig_factor_cols <- c("is_bad", "zip_code", "addr_state", "grade", "sub_grade", "purpose", "home_ownership")
 orig_data_list <- load_training_data(orig_file_name, orig_factor_cols)
 split_list <- orig_data_list$split_list
-
-# set the global number of models and folds to run
-num_models <- 25
-nfolds <- 5
 
 # create an empty AUC list to store the AUC results
 auc_list <- list()
@@ -347,20 +347,16 @@ rf_models <- get_h2o_model_list(rf_grid)
 gbm_models <- get_h2o_model_list(gbm_grid)
 model_list <- c(rf_models, gbm_models, glm_model, nb_model)
 
-ensemble_perf <- get_h2o_ensemble(model_list)
+ensemble_perf <- get_h2o_ensemble(split_list, model_list)
 print(ensemble_perf)
 ```
 
 ```{r}
 #### build the loan marketplace models
 marketplace_file_name <- "data/loanstats_2015_marketplace_optimized.csv"
-market_factor_cols <- c("is_bad", "zip_code")
+market_factor_cols <- c("is_bad")
 market_data_list <- load_training_data(marketplace_file_name, market_factor_cols)
 split_list <- market_data_list$split_list
-
-# set the global number of models and folds to run
-num_models <- 2
-nfolds <- 2
 
 # build the Random Forest Model
 mp_rf_grid <- get_rf_grid(split_list, num_models, nfolds)
@@ -503,7 +499,7 @@ best_predictors <- h2o.varimp(best_model)$variable
 
 if (loan_marketplace == TRUE){
   # select the best 6 predictors for use in the prediction models
-  best_predictors <- best_predictors[1:6]
+  best_predictors <- best_predictors[1:5]
 }else{
   # select the best 27 predictors
   best_predictors <- best_predictors[1:27]

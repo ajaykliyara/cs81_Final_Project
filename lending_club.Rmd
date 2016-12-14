@@ -134,7 +134,7 @@ get_rf_grid <- function(split_list,
             fold_assignment = "Modulo",
             keep_cross_validation_predictions = TRUE)
   
-  sortedGrid <- h2o.getGrid(rf_grid_name[1], sort_by="auc")
+  sortedGrid <- h2o.getGrid(rf_grid_name[1], sort_by="auc", decreasing = TRUE)
   return(sortedGrid)
 }
 ```
@@ -169,7 +169,7 @@ get_gbm_grid <- function(split_list,
            fold_assignment = "Modulo",
            keep_cross_validation_predictions = TRUE)
   
-  sortedGrid <- h2o.getGrid(gbm_grid_name[1], sort_by="auc")
+  sortedGrid <- h2o.getGrid(gbm_grid_name[1], sort_by="auc", decreasing = TRUE)
   
   return(sortedGrid)
 }
@@ -223,11 +223,11 @@ get_nb <- function(split_list, nfolds = 5){
 ```{r}
 #### Deep Learning Model
 get_dl_grid <- function(split_list, 
+                        max_num_models = 25,
                         nfolds = 5,
                         in_max_run_time_sec = 0, 
                         max_epochs = 1000000, 
-                        in_max_runtime_secs = 0,
-                        max_num_models = 25){
+                        in_max_runtime_secs = 0){
   
   dl_grid_name <- "deep_learning"
   h2o.rm(dl_grid_name[1])
@@ -268,7 +268,7 @@ get_dl_grid <- function(split_list,
            fold_assignment = "Modulo",
            keep_cross_validation_predictions = TRUE)
   
-  sortedGrid <- h2o.getGrid(dl_grid_name[1], sort_by="auc")
+  sortedGrid <- h2o.getGrid(dl_grid_name[1], sort_by="auc", decreasing = TRUE)
   
   return(sortedGrid)
 }
@@ -307,8 +307,8 @@ get_h2o_ensemble <- function(split_list, model_list){
 
 ```{r}
 # set the global number of models and folds to run
-num_models <- 2
-nfolds <- 5
+num_models <- 3
+nfolds <- 2
 ```
 
 ```{r}
@@ -344,7 +344,7 @@ perf_nb <- get_test_perf(split_list, nb_model, "Naive Bayes")
 auc_list$nb <- h2o.auc(perf_nb)
 
 # build the deep learning model
-dl_grid <- get_dl_grid(split_list, nfolds)
+dl_grid <- get_dl_grid(split_list, num_models, nfolds)
 dl_model <- get_best_model(dl_grid)
 perf_dl <- get_test_perf(split_list, dl_model, "Deep Learning")
 
@@ -359,7 +359,7 @@ print(ensemble_perf)
 ```
 
 ```{r}
-#### build the loan marketplace models
+#### build the loan marketplace model
 marketplace_file_name <- "data/loanstats_2015_marketplace_optimized.csv"
 market_factor_cols <- c("is_bad")
 market_data_list <- load_training_data(marketplace_file_name, market_factor_cols)

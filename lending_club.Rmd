@@ -357,6 +357,9 @@ model_list <- c(rf_models, gbm_models, dl_models, glm_model, nb_model)
 
 ensemble_perf <- get_h2o_ensemble(split_list, model_list)
 print(ensemble_perf)
+
+print("Loan Origination Validation data AUC summary: \n") 
+print(data.frame(auc_list))
 ```
 
 ```{r}
@@ -367,9 +370,13 @@ market_data_list <- load_training_data(marketplace_file_name, market_factor_cols
 split_list <- market_data_list$split_list
 
 # build the glm model
+mp_auc_list <- list()
 mp_glm_model <- get_glm(split_list, nfolds)
 mp_perf_glm <- get_test_perf(split_list, mp_glm_model, "GLM")
-auc_list$mp_glm <- h2o.auc(mp_perf_glm)
+mp_auc_list$glm <- h2o.auc(mp_perf_glm)
+
+print("Marketplace Loan Validation data AUC summary: \n") 
+print(data.frame(mp_auc_list))
 ```
 
 ```{r eval = FALSE, echo = FALSE}

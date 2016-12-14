@@ -346,6 +346,7 @@ auc_list$nb <- h2o.auc(perf_nb)
 # build the deep learning model
 dl_grid <- get_dl_grid(split_list, num_models, nfolds)
 dl_model <- get_best_model(dl_grid)
+auc_list$dl <- h2o.auc(dl_model)
 perf_dl <- get_test_perf(split_list, dl_model, "Deep Learning")
 
 # ensemble stacking 

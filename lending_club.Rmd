@@ -307,8 +307,8 @@ get_h2o_ensemble <- function(split_list, model_list){
 
 ```{r}
 # set the global number of models and folds to run
-num_models <- 3
-nfolds <- 2
+num_models <- 25
+nfolds <- 5
 ```
 
 ```{r}

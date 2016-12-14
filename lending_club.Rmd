@@ -123,18 +123,19 @@ get_rf_grid <- function(split_list,
                           balance_classes = in_balance_classes) 
   
   # fit the random forest search grid
-  h2o.rf_grid <- h2o.grid("randomForest", x = split_list$x, y = split_list$y, 
-                          training_frame = split_list$train,
-                          validation_frame = split_list$valid,
-                          hyper_params = rf_hyper_params,
-                          search_criteria = random_search_criteria,
-                          seed = 3, 
-                          grid_id = rf_grid_name[1],
-                          nfolds = nfolds,
-                          fold_assignment = "Modulo",
-                          keep_cross_validation_predictions = TRUE)
+  h2o.grid("randomForest", x = split_list$x, y = split_list$y, 
+            training_frame = split_list$train,
+            validation_frame = split_list$valid,
+            hyper_params = rf_hyper_params,
+            search_criteria = random_search_criteria,
+            seed = 3, 
+            grid_id = rf_grid_name[1],
+            nfolds = nfolds,
+            fold_assignment = "Modulo",
+            keep_cross_validation_predictions = TRUE)
   
-  return(h2o.rf_grid)
+  sortedGrid <- h2o.getGrid(rf_grid_name[1], sort_by="auc")
+  return(sortedGrid)
 }
 ```
 
@@ -157,18 +158,20 @@ get_gbm_grid <- function(split_list,
                            ntrees = c(seq(100, 500, 50)))
   
   # Train and validate a grid of GBMs
-  gbm_grid <- h2o.grid("gbm", x = split_list$x, y = split_list$y,
-                       grid_id = gbm_grid_name[1],
-                       training_frame = split_list$train,
-                       validation_frame = split_list$valid,
-                       seed = 3,
-                       hyper_params = gbm_hyper_params,
-                       search_criteria = random_search_criteria,
-                       nfolds = nfolds,
-                       fold_assignment = "Modulo",
-                       keep_cross_validation_predictions = TRUE)
+  h2o.grid("gbm", x = split_list$x, y = split_list$y,
+           grid_id = gbm_grid_name[1],
+           training_frame = split_list$train,
+           validation_frame = split_list$valid,
+           seed = 3,
+           hyper_params = gbm_hyper_params,
+           search_criteria = random_search_criteria,
+           nfolds = nfolds,
+           fold_assignment = "Modulo",
+           keep_cross_validation_predictions = TRUE)
   
-  return(gbm_grid)
+  sortedGrid <- h2o.getGrid(gbm_grid_name[1], sort_by="auc")
+  
+  return(sortedGrid)
 }
 ```
 
@@ -217,19 +220,17 @@ get_nb <- function(split_list, nfolds = 5){
 }
 ```
 
-```{r eval = FALSE, echo = FALSE}
+```{r}
 #### Deep Learning Model
-dl_grid_name <- "deep_learning"
-get_dl_grid <- function(data, factor_cols, in_max_run_time_sec = 0, 
-                        max_epochs = 1000000, class_col_name = "is_bad", 
-                        in_grid_id = dl_grid_name, in_max_runtime_secs = 0){
+get_dl_grid <- function(split_list, 
+                        nfolds = 5,
+                        in_max_run_time_sec = 0, 
+                        max_epochs = 1000000, 
+                        in_max_runtime_secs = 0,
+                        max_num_models = 25){
   
-  h2o.rm(in_grid_id)
-  
-  data[,factor_cols] <- as.factor(data[,factor_cols])
-  
-  # split into train, validation, and test sets
-  split_list <- get_split_list(data, factor_cols)
+  dl_grid_name <- "deep_learning"
+  h2o.rm(dl_grid_name[1])
   
   # Deeplearning hyperparamters
   activation_opt <- c("Rectifier", "Tanh", "TanhWithDropout", "RectifierWithDropout", 
@@ -238,39 +239,39 @@ get_dl_grid <- function(data, factor_cols, in_max_run_time_sec = 0,
   l2_opt <- c(0, 0.00001, 0.0001, 0.001, 0.01, 0.1)
   hidden_layers = list(c(8,8), c(10,10),c(12,12), c(14,14), c(8,8,8),
                        c(10,10,10), c(12,12,12), c(14,14,14))
+  
   hyper_params <- list(activation = activation_opt,
                        l1 = l1_opt,
                        l2 = l2_opt,
                        hidden = hidden_layers)
+  
   search_criteria <- list(strategy = "RandomDiscrete", 
-                          max_runtime_secs = in_max_run_time_sec)
+                          max_runtime_secs = in_max_run_time_sec,
+                          max_models = max_num_models)
   
   # Train and validate the deep learning grid
-  dl_grid <- h2o.grid("deeplearning", x = split_list$x, y = split_list$y,
-                      grid_id = "dl_grid",
-                      training_frame = split_list$train,
-                      validation_frame = split_list$valid,
-                      seed = 3,
-                      # hidden = c(10, 10),
-                      hyper_params = hyper_params,
-                      search_criteria = search_criteria,
-                      epochs = max_epochs,
-                      stopping_rounds = 2,
-                      stopping_metric = "AUC",
-                      stopping_tolerance = 0.01,
-                      max_runtime_secs = in_max_runtime_secs,
-                      quiet_mode = FALSE)
+  h2o.grid("deeplearning", 
+           x = split_list$x, 
+           y = split_list$y,
+           grid_id = dl_grid_name[1],
+           training_frame = split_list$train,
+           validation_frame = split_list$valid,
+           seed = 3,
+           hyper_params = hyper_params,
+           search_criteria = search_criteria,
+           epochs = max_epochs,
+           stopping_rounds = 5,
+           stopping_metric = "AUC",
+           stopping_tolerance = 0.01,
+           quiet_mode = FALSE,
+           nfolds = nfolds,
+           fold_assignment = "Modulo",
+           keep_cross_validation_predictions = TRUE)
   
-  return(dl_grid)
+  sortedGrid <- h2o.getGrid(dl_grid_name[1], sort_by="auc")
+  
+  return(sortedGrid)
 }
-
-# build the deep learning model
-eight_hours <- 60 * 60 * 8
-one_hour <- 60 * 60
-dl_grid <- get_dl_grid(data, factor_cols, 
-                       in_max_run_time_sec = one_hour,
-                       max_epochs = 1000)
-# dl_model <- get_best_model(split_list, dl_grid_name)
 ```
 
 ```{r}
@@ -306,7 +307,7 @@ get_h2o_ensemble <- function(split_list, model_list){
 
 ```{r}
 # set the global number of models and folds to run
-num_models <- 5
+num_models <- 2
 nfolds <- 5
 ```
 
@@ -342,10 +343,16 @@ nb_model <- get_nb(split_list, nfolds)
 perf_nb <- get_test_perf(split_list, nb_model, "Naive Bayes")
 auc_list$nb <- h2o.auc(perf_nb)
 
+# build the deep learning model
+dl_grid <- get_dl_grid(split_list, nfolds)
+dl_model <- get_best_model(dl_grid)
+perf_dl <- get_test_perf(split_list, dl_model, "Deep Learning")
+
 # ensemble stacking 
 rf_models <- get_h2o_model_list(rf_grid)
 gbm_models <- get_h2o_model_list(gbm_grid)
-model_list <- c(rf_models, gbm_models, glm_model, nb_model)
+dl_models <- get_h2o_model_list(dl_grid)
+model_list <- c(rf_models, gbm_models, dl_models, glm_model, nb_model)
 
 ensemble_perf <- get_h2o_ensemble(split_list, model_list)
 print(ensemble_perf)
@@ -358,22 +365,10 @@ market_factor_cols <- c("is_bad")
 market_data_list <- load_training_data(marketplace_file_name, market_factor_cols)
 split_list <- market_data_list$split_list
 
-# build the Random Forest Model
-mp_rf_grid <- get_rf_grid(split_list, num_models, nfolds)
-mp_rf_model <- get_best_model(mp_rf_grid)
-mp_perf_rf <- get_test_perf(split_list, mp_rf_model, "Random Forest")
-auc_list$random_forest <- h2o.auc(mp_perf_rf)
-
 # build the glm model
 mp_glm_model <- get_glm(split_list, nfolds)
 mp_perf_glm <- get_test_perf(split_list, mp_glm_model, "GLM")
 auc_list$mp_glm <- h2o.auc(mp_perf_glm)
-
-# build the gbm model
-mp_gbm_grid <- get_gbm_grid(split_list,  num_models, nfolds)
-mp_gbm_model <- get_best_model(mp_gbm_grid)
-mp_perf_gbm <- get_test_perf(split_list, mp_gbm_model, "GBM")
-auc_list$mp_gbm <- h2o.auc(mp_perf_gbm)
 ```
 
 ```{r eval = FALSE, echo = FALSE}

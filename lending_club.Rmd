@@ -189,7 +189,9 @@ get_glm <- function(split_list, nfolds = 5){
                      model_id = glm_model_name[1],
                      validation_frame = split_list$valid,
                      family = "binomial",
-                     #lambda_search = TRUE,
+                     # commented out due to bug in H2O
+                     # lambda_search fails when nfolds is used
+                     #lambda_search = TRUE, 
                      nfolds = nfolds,
                      fold_assignment = "Modulo",
                      keep_cross_validation_predictions = TRUE,
@@ -307,7 +309,7 @@ get_h2o_ensemble <- function(split_list, model_list){
 
 ```{r}
 # set the global number of models and folds to run
-num_models <- 25
+num_models <- 10
 nfolds <- 5
 ```
 
@@ -325,29 +327,29 @@ auc_list <- list()
 rf_grid <- get_rf_grid(split_list, num_models, nfolds)
 rf_model <- get_best_model(rf_grid)
 perf_rf <- get_test_perf(split_list, rf_model, "Random Forest")
-auc_list$random_forest <- h2o.auc(perf_rf)
+auc_list$random_forest <- perf_rf@metrics$AUC
 
 # build the gbm model
 gbm_grid <- get_gbm_grid(split_list,  num_models, nfolds)
 gbm_model <- get_best_model(gbm_grid)
 perf_gbm <- get_test_perf(split_list, gbm_model, "GBM")
-auc_list$gbm <- h2o.auc(perf_gbm)
+auc_list$gbm <- perf_gbm@metrics$AUC
 
 # build the glm model
 glm_model <- get_glm(split_list, nfolds)
 perf_glm <- get_test_perf(split_list, glm_model, "GLM")
-auc_list$glm <- h2o.auc(perf_glm)
+auc_list$glm <- perf_glm@metrics$AUC
 
 # build the naive bayes model
 nb_model <- get_nb(split_list, nfolds)
 perf_nb <- get_test_perf(split_list, nb_model, "Naive Bayes")
-auc_list$nb <- h2o.auc(perf_nb)
+auc_list$nb <- perf_nb@metrics$AUC
 
 # build the deep learning model
 dl_grid <- get_dl_grid(split_list, num_models, nfolds)
 dl_model <- get_best_model(dl_grid)
-auc_list$dl <- h2o.auc(dl_model)
 perf_dl <- get_test_perf(split_list, dl_model, "Deep Learning")
+auc_list$dl <- perf_dl@metrics$AUC
 
 # ensemble stacking 
 rf_models <- get_h2o_model_list(rf_grid)
@@ -357,8 +359,13 @@ model_list <- c(rf_models, gbm_models, dl_models, glm_model, nb_model)
 
 ensemble_perf <- get_h2o_ensemble(split_list, model_list)
 print(ensemble_perf)
+auc_list$ensemble <- ensemble_perf$ensemble@metrics$AUC
 
-print("Loan Origination Validation data AUC summary: \n") 
+# sort the AUC List
+auc_list <- auc_list[order(sapply(auc_list, '[[', i=1))]
+
+# Print the AUC List
+print("Loan Origination Blind Test data AUC summary: \n") 
 print(data.frame(auc_list))
 ```
 
